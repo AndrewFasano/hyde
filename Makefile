@@ -1,9 +1,9 @@
 CFLAGS=-shared -fcoroutines -g -I../qemu/accel/kvm/
 
-all: norootid envmgr
+all: norootid.so envmgr.so shiftstderr.so alwaysroot.so
 
-norootid: norootid.cpp
-	$(CC) norootid.cpp $(CFLAGS) -o norootid.so
+%.so : %.cpp
+		$(CC) $(CFLAGS) $< -o $@
 
-envmgr: envmgr.cpp
-	$(CC) envmgr.cpp $(CFLAGS) -o envmgr.so
+clean:
+	rm -f norootid.so envmgr.so shiftstderr.so alwaysroot.so
