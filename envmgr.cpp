@@ -26,10 +26,10 @@ SyscCoroutine start_coopter(asid_details* details) {
   __u64 *host_envp; // Can dereference on host
   __u64 *guest_envp = (__u64*)get_arg(regs, 2); // Can't dereference on host, just use for addrs
   for (int i=0; i < 255; i++) {
-    map_guest_pointer(host_envp, details, &guest_envp[i]);
+    map_guest_pointer(details, host_envp, &guest_envp[i]);
     if (*host_envp == 0) break;
     char* env_val;
-    map_guest_pointer(env_val, details, *host_envp);
+    map_guest_pointer(details, env_val,*host_envp);
 
     if (strncmp(inject.c_str(), env_val, inject.find('=')+1) == 0) {
       // Existing env var duplicates the one we're injecting - don't save it
@@ -58,7 +58,7 @@ SyscCoroutine start_coopter(asid_details* details) {
   // Write our `inject` string into buffer, save it's guest addr
   char* host_buf;
   bool success;
-  map_guest_pointer_status(host_buf, details, guest_buf, &success);
+  map_guest_pointer_status(details, host_buf, guest_buf, &success);
   if (!success) {
     printf("FAILURE to map guest pointer at %llx\n", (__u64)guest_buf);
     co_return;
@@ -72,15 +72,15 @@ SyscCoroutine start_coopter(asid_details* details) {
   int i=0;
   char** newenvp;
   for (auto &env_item : guest_arg_ptrs) {
-    map_guest_pointer(newenvp, details, &guest_buf[i]);
+    map_guest_pointer(details, newenvp, &guest_buf[i]);
     *newenvp = (char*)env_item;
     i++;
   }
 
   // Add our new variable, then a null terminator
-  map_guest_pointer(newenvp, details, &guest_buf[i]);
+  map_guest_pointer(details, newenvp, &guest_buf[i]);
   *newenvp = (char*)injected_arg_g;
-  map_guest_pointer(newenvp, details, &guest_buf[i+1]);
+  map_guest_pointer(details, newenvp,&guest_buf[i+1]);
   *newenvp = (char*)0;
 
   // Finally: when HyDE goes to restore the original syscall, we *don't* want

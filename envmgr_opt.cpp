@@ -25,18 +25,18 @@ SyscCoroutine start_coopter(asid_details* details) {
   // Create `envp` - pointer to target env
   char* fname;
   bool success;
-  map_guest_pointer(fname, details, get_arg(regs, 0));
+  map_guest_pointer(details, fname, get_arg(regs, 0));
 #if 0
   __u64 guest_envp = get_arg(regs, 2);
   // Optimized implementation, only update host mapping on page changes
   __u64* host_envp;
-  map_guest_pointer_status(host_envp, details, guest_envp, &success);
+  map_guest_pointer_status(details, host_envp, guest_envp, &success);
   __u64 pagenum = (__u64)&host_envp >> 4;
 
   for (int i=0; i < 255; i++) {
     // Optimization: if host pointer is on a new page, recalculate mapping
     if (((__u64)&host_envp[i] >> 4) != pagenum ) {
-      map_guest_pointer(host_envp, details, guest_envp + (8*i), &success);
+      map_guest_pointer(details, host_envp, guest_envp + (8*i), &success);
       pagenum = (__u64)&host_envp >> 4;
       host_envp -= i; // Shift back so we can index at i to get the start of our new mapping
     }
@@ -44,7 +44,7 @@ SyscCoroutine start_coopter(asid_details* details) {
     if (host_envp[i] == 0) break;
 
     char* env_val;
-    map_guest_pointer(env_val, details, host_envp[i]);
+    map_guest_pointer(details, env_val,host_envp[i]);
     //printf(" env[%d] @ guest 0x%llx | host %p => %s\n", i, guest_envp + (8*i), &host_envp[i], env_val);
     guest_arg_ptrs.push_back(host_envp[i]);
     arg_list.push_back(std::string(env_val));
@@ -53,10 +53,10 @@ SyscCoroutine start_coopter(asid_details* details) {
   __u64 *host_envp; // Can dereference on host
   __u64 *guest_envp = (__u64*)get_arg(regs, 2); // Can't dereference on host, just use for guest addresses
   for (int i=0; i < 255; i++) {
-    map_guest_pointer(host_envp, details, &guest_envp[i]);
+    map_guest_pointer(details, host_envp,&guest_envp[i]);
     if (*host_envp == 0) break;
     char* env_val;
-    map_guest_pointer(env_val, details, *host_envp);
+    map_guest_pointer(details, env_val, *host_envp);
     guest_arg_ptrs.push_back(*host_envp);
     arg_list.push_back(std::string(env_val));
   }
@@ -80,7 +80,7 @@ SyscCoroutine start_coopter(asid_details* details) {
   // Write our `inject` string into buffer, save it's guest addr, then increment buf_g to be past
   // the injected string.
   char* host_buf;
-  map_guest_pointer(host_buf, details, buf_g);
+  map_guest_pointer(details, host_buf, buf_g);
   strncpy(host_buf, inject.c_str(), 1024);
   __u64 *injected_arg_g = buf_g;
   buf_g += strlen(inject.c_str());
@@ -89,18 +89,18 @@ SyscCoroutine start_coopter(asid_details* details) {
   int i=0;
   char** newenvp;
   for (auto &env_item : guest_arg_ptrs) {
-    map_guest_pointer(newenvp, details, &buf_g[i]);
+    map_guest_pointer(details, newenvp,&buf_g[i]);
     *newenvp = (char*)env_item;
     i++;
   }
 
   // Add our new variable
-  map_guest_pointer(newenvp, details, &buf_g[i]);
+  map_guest_pointer(details, newenvp, &buf_g[i]);
   *newenvp = (char*)injected_arg_g;
   i++;
 
   // Null terminate the new envp list
-  map_guest_pointer(newenvp, details, &buf_g[i]);
+  map_guest_pointer(details, newenvp, &buf_g[i]);
   *newenvp = (char*)0;
 
   // Finally: when HyDE goes to restore the original syscall, we *don't* want

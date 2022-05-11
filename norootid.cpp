@@ -13,7 +13,7 @@ SyscCoroutine start_coopter(asid_details* details) {
 
   // Create `fname`, a pointer into *guest* memory at the address that's in the first syscall arg
   char * fname;
-  map_guest_pointer(fname, details, get_arg(regs, 0));
+  map_guest_pointer(details, fname, get_arg(regs, 0));
 
   printf("[NoRootID] SYS_exec(%s)\n", fname);
   __u64 uid = yield_syscall(details, __NR_getuid);

@@ -1,6 +1,6 @@
-CFLAGS=-shared -fcoroutines -g -I../qemu/accel/kvm/
+CFLAGS=-shared -fcoroutines -g -I../qemu/accel/kvm/ -std=c++20
 
-all: norootid.so envmgr.so shiftstderr.so alwaysroot.so
+all: norootid.so envmgr.so shiftstderr.so alwaysroot.so libhook.so
 
 %.so : %.cpp
 		$(CC) $(CFLAGS) $< -o $@
