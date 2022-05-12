@@ -9,41 +9,49 @@
 #include <linux/elf.h>
 #include "hyde.h"
 
-#if 0
-# /bin/whoami
-
-OPEN LIB
-openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3
-
-READ LIB INTO MEMORY
-read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0P\237\2\0\0\0\0\0"..., 832) = 832
-pread64(3, "\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0"..., 784, 64) = 784
-pread64(3, "\4\0\0\0 \0\0\0\5\0\0\0GNU\0\2\0\0\300\4\0\0\0\3\0\0\0\0\0\0\0"..., 48, 848) = 48
-pread64(3, "\4\0\0\0\24\0\0\0\3\0\0\0GNU\0\211\303\313\205\371\345PFwdq\376\320^\304A"..., 68, 896) = 68
-newfstatat(3, "", {st_mode=S_IFREG|0644, st_size=2216304, ...}, AT_EMPTY_PATH) = 0
-pread64(3, "\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0"..., 784, 64) = 784
-
-Now BUF (first read buf* arg) should contain entire library - program knows the different sections of it
-
-
-Load the various sections of the library into the current executables memory...
-
-mmap(NULL, 2260560, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0x7f6b52e10000
-mmap(0x7f6b52e38000, 1658880, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x28000) = 0x7f6b52e38000
-mmap(0x7f6b52fcd000, 360448, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x1bd000) = 0x7f6b52fcd000
-mmap(0x7f6b53025000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x214000) = 0x7f6b53025000
-
-The functions we want to hook are in the PROT_EXEC section
-  But how do we map from name to offset?
-
-
-#endif
-
 static char* last_libname = NULL;
+static unsigned long last_puts = 0;
+
+//static char payload[] = "\x48\xC7\xC0\x0D\x00\x00\x00\x0F\x01\xC1"
+static char payload[] = "\x48\xC7\xC0\xFF\xFF\x00\x00\x0F\x05"; // syscall with rax=0xffff
+static char clobbered_data[sizeof(payload)];
+
+void hydpercall_handle(void* cpu, long unsigned int nr, long unsigned int rip,
+                       long unsigned int rbx, long unsigned int a2, long unsigned int a3,
+                       long unsigned int a4, long unsigned int a5) {
+
+  int error;
+  long unsigned int orig_rip = rip-7; // XXX CUSTOMIZE
+  printf("\n\nHyDEpercall\n");
+  printf("nr 0x%lx, rip 0x%lx (orig was 0x%lx), rbx 0x%lx\n", nr, rip, orig_rip, rbx);
+
+  // Translate original RIP to host pointer and print data
+  __u64 cur_insn_ptr = translate(cpu, orig_rip, &error);
+  if (error) {
+    printf("Bad translate\n");
+    return;
+  }
+  for (int i=0; i < sizeof(payload)-1; i++) {
+    printf("Byte [%02d] at %lx is %02x\n", i, orig_rip+i, ((char*)cur_insn_ptr)[i]&0xff);
+  }
+
+  // Restore data
+  //memcpy((void*)cur_insn_ptr, clobbered_data, sizeof(payload));
+
+  // Read all registers, then revert PC
+  struct kvm_regs regs;
+  assert(getregs(cpu, &regs) == 0 && "Couldn't get regs");
+
+  //printf("\nREGS PC=%llx RSP=%llx:\n", regs.rip, regs.rsp);
+  //dump_regs(regs);
+  regs.rip = orig_rip-2;
+
+  assert(setregs(cpu, &regs) && "Couldn't set regs");
+}
 
 bool should_coopt(void*cpu, long unsigned int callno) {
   // We inject syscalls starting at every execve
-  return callno == __NR_open || callno == __NR_openat || callno == __NR_mmap;
+  return callno == __NR_open || callno == __NR_openat || callno == __NR_mmap || callno == 0xFFFF;
 }
 
 SyscCoroutine start_coopter(asid_details* details) {
@@ -53,7 +61,12 @@ SyscCoroutine start_coopter(asid_details* details) {
 
   int callno = CALLNO(regs);
 
-  if (callno == __NR_open || callno == __NR_openat) {
+  if (callno == 0xFFFF) {
+    printf("ZOMG\n");
+    details->skip = true;
+    set_RET(details->orig_regs, (__u64)0);
+
+  }else if (callno == __NR_open || callno == __NR_openat) {
     int dir_arg_no = (callno == __NR_openat) ? 1 : 0;
 
     char *host_targname;
@@ -72,7 +85,7 @@ SyscCoroutine start_coopter(asid_details* details) {
         co_return;
     }
 
-    printf("[HYDE] Saw open of a library: %s\n", host_targname);
+    //printf("[HYDE] Saw open of a library: %s\n", host_targname);
     if (last_libname != NULL)
       free(last_libname);
     last_libname = strdup(host_targname);
@@ -87,32 +100,6 @@ SyscCoroutine start_coopter(asid_details* details) {
     if (fd == -1) {
       co_return;
     }
-
-#if 0
-    if (off == 0) {
-      // Let's read the full file
-      __u64* scratch_guest_buf = (__u64*)yield_syscall(details, __NR_mmap,
-          /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
-          /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
-
-      __u64 bytes_read -1;
-      char* host_data;
-      char *data = (char*)malloc(10000);
-      int i=0;
-      
-      while (bytes_read != 0)  {
-        bytes_read = yield_syscall(details, __NR_read, (__u64)scratch_guest_buf, 1024);
-        char* host_data;
-        map_guest_pointer(details, host_data, &guest_buf[i]);
-        memcpy(&data[i], &host_data, bytes_read); // XXX: untested
-        i += bytes_read;
-      }
-
-      // TODO: something with data
-      free(data);
-      yield_syscall(details, __NR_lseek, fd, 0, SEEK_SET); // Restore cursor to start
-    }
-#endif
 
     // Let's yield the original syscall, then skip it later
     // This way we can analyze the data before the guest continues
@@ -129,8 +116,8 @@ SyscCoroutine start_coopter(asid_details* details) {
 
       unsigned long phnum = ehdr.e_phnum;
       unsigned long phoff = ehdr.e_phoff;
-      printf("Found dynamic section: loaded at %llx with %ld entries in program header table\n",
-          (__u64)guest_buf, phnum);
+      //printf("Found dynamic section: loaded at %llx with %ld entries in program header table\n",
+      //    (__u64)guest_buf, phnum);
 
       bool found_dynamic = false;
       Elf32_Phdr *dynamic_phdr; // XXX why is this elf32?
@@ -226,7 +213,12 @@ SyscCoroutine start_coopter(asid_details* details) {
               char* sym_name;
               map_guest_pointer(details, sym_name, strtab+onesymtab->st_name);
               __u64 sym_addr = (__u64)guest_buf + onesymtab->st_value;
-              printf("%llx: %s\n", sym_addr, sym_name);
+              //printf("%llx: %s\n", sym_addr, sym_name);
+
+              if (strcmp(sym_name, "puts") == 0 && sym_addr != last_puts){
+                printf("\tFound puts at %llx\n", sym_addr);
+                last_puts = sym_addr;
+              }
             }
           }
         }
@@ -234,32 +226,30 @@ SyscCoroutine start_coopter(asid_details* details) {
     }
 
     if (prot & PROT_EXEC) {
-      char *data = (char*)malloc(len);
-
-#if 0
-      for (int i=0; i < len; i++) {
-        // Read in page-sized chunks
-        //printf("Map guest %llx to host\n", (__u64)&guest_buf[i]);
-        map_guest_pointer(details, host_data, &guest_buf[i]);
-        int valid_sz = std::min((__u64)(host_data) - ((((__u64)host_data >> 12) << 12) + 0x1000)-1, (__u64)len-i);
-        //printf("Can read 0x%x bytes: [%llx, %llx]\n", valid_sz, (__u64)host_data, (__u64)host_data+valid_sz);
-        memcpy(&data[i], &host_data, valid_sz);
-        i+= valid_sz;
+      if (last_puts != 0 && (__u64)guest_buf < last_puts) {
+        char* target_data;
+        bool success;
+        map_guest_pointer_status(details, target_data, last_puts, &success);
+        if (success) {
+          if (memcmp(target_data, payload, sizeof(payload)-1) != 0) {
+            printf("[HyDE] Rewriting puts in memory at %lx to add hypercall\n", last_puts);
+            memcpy(clobbered_data, target_data, sizeof(payload)-1);
+            printf("Clobbering %ld bytes of data: ", sizeof(payload)-1);
+            for (int i=0; i < sizeof(payload)-1; i++) {
+              printf("%02x ", target_data[i]&0xff);
+            }
+            printf("\n              with new data: ");
+            for (int i=0; i < sizeof(payload)-1; i++) {
+              printf("%02x ", payload[i]&0xff);
+            }
+            printf("\n");
+            memcpy(target_data, payload, sizeof(payload)-1);
+          }
+        }else{
+          printf("Failed to map guest pointer for symbol: %lx\n", last_puts);
+        }
+        //last_puts = 0;
       }
-
-      // Write the library to host disk
-      std::string libpath(last_libname);
-      std::size_t found = libpath.find_last_of("/");
-      std::string libname = libpath.substr(found+1);
-      std::ofstream myfile;
-      myfile.open(libname, std::ios::out | std::ios::binary);
-      myfile.write(data, len);
-      myfile.close();
-
-      free(data);
-#endif
-
-      printf("Library %s has executable section loaded at %llx\n", last_libname, (__u64)guest_buf);
     }
 
     // restore all regs, then set desired return value
