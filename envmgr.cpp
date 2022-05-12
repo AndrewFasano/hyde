@@ -6,11 +6,6 @@
 #include <vector>
 #include "hyde.h"
 
-bool should_coopt(void*cpu, long unsigned int callno) {
-  // We inject syscalls starting at every execve
-  return callno == __NR_execve;
-}
-
 SyscCoroutine start_coopter(asid_details* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
@@ -89,3 +84,12 @@ SyscCoroutine start_coopter(asid_details* details) {
   set_ARG2(details->orig_regs, (__u64)guest_buf);
   details->modify_original_args = true;
 }
+
+create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
+  // We inject syscalls starting at every execve
+  if (callno == __NR_execve)
+    return &start_coopter;
+  return NULL;
+}
+
+

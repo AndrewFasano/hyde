@@ -2,10 +2,6 @@
 #include <stdio.h>
 #include "hyde.h" // Hyde-API is provided in qemu which we can call into to thanks to `-rdynamic` linker flag
 
-bool should_coopt(void*cpu, long unsigned int callno) {
-  return callno == __NR_execve;
-}
-
 SyscCoroutine start_coopter(asid_details* details) {
   // Get guest registers so we can examine the first argument
   struct kvm_regs regs;
@@ -23,3 +19,9 @@ SyscCoroutine start_coopter(asid_details* details) {
     printf("[NoRootID]: Non-root process! UID is %lld PID is %lld\n", uid, pid);
   }
 }
+create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
+  if (callno == __NR_execve)
+    return &start_coopter;
+  return NULL;
+}
+

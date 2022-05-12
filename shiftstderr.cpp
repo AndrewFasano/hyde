@@ -4,16 +4,6 @@
 
 #define PRE_INJECT
 
-bool should_coopt(void*cpu, long unsigned int callno) {
-  //
-  if (callno != __NR_write) return false;
-
-  struct kvm_regs r;
-  assert(getregs(cpu, &r) == 0);
-  return get_arg(r, 0) == 2; // Is it writing to (probably) stderr?
-}
-
-
 SyscCoroutine start_coopter(asid_details* details) {
   // Test: Change writes to stderr to be shifted by 1 char
   // If pre-inject is set we first inject a syscall
@@ -28,6 +18,16 @@ SyscCoroutine start_coopter(asid_details* details) {
   __u64 foo = get_arg(details->orig_regs, 1);
   set_ARG1(details->orig_regs, foo+1);
   co_return;
+}
+
+create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
+  if (callno == __NR_write) {
+    struct kvm_regs r;
+    assert(getregs(cpu, &r) == 0);
+    if (get_arg(r, 0) == 2) // Is it writing to (probably) stderr?
+      return &start_coopter;
+  }
+  return NULL; 
 }
 
 
