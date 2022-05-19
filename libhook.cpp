@@ -181,7 +181,7 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
             //printf("%llx: %s\n", sym_addr, sym_name);
 
             if (strcmp(sym_name, TARG_F) == 0 && sym_addr != last_puts){
-              printf("\tFound %s at %llx\n", TARG_F, sym_addr);
+              printf("[HYDE] \tFound %s at %llx\n", TARG_F, sym_addr);
               last_puts = sym_addr;
             }
           }
@@ -202,11 +202,11 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
 
           // Store data we clobber and then log it
           memcpy(clobbered_data, target_data, sizeof(payload)-1);
-          printf("Clobbering %ld bytes of data: ", sizeof(payload)-1);
+          printf("[HYDE] Clobbering %ld bytes of data: ", sizeof(payload)-1);
           for (int i=0; i < sizeof(payload)-1; i++) {
             printf("%02x ", target_data[i]&0xff);
           }
-          printf("\n              with new data: ");
+          printf("\n[HYDE]              with new data: ");
           for (int i=0; i < sizeof(payload)-1; i++) {
             printf("%02x ", payload[i]&0xff);
           }
@@ -231,31 +231,26 @@ SyscCoroutine start_coopter_custom(asid_details* details) {
   // Get guest registers so we can examine the first argument
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
-  printf("Call to %s detected at PC %llx\n", TARG_F, regs.rcx);
+  printf("[HYDE] Call to %s detected at PC %llx\n", TARG_F, regs.rcx);
 
   char* s;
   bool success;
   // Arg0: RDI
   map_guest_pointer_status(details, s, regs.rdi, &success);
-  if (success) {
-    printf("Arg 0: %s\n", s);
-  }else{
-    printf("Arg 0: Could not read %llx\n", regs.rdi);
-  }
+  if (success) printf("[HYDE]    Arg 0: %s\n", s);
+  else         printf("[HYDE]    Arg 0: Could not read %llx\n", regs.rdi);
 
   map_guest_pointer_status(details, s, regs.rsi, &success);
-  if (success) {
-    printf("Arg 1: %s\n", s);
-  }else{
-    printf("Arg 1: Could not read %llx\n", regs.rsi);
-  }
+  if (success)  printf("[HYDE]    Arg 1: %s\n", s);
+  else          printf("[HYDE]    Arg 1: Could not read %llx\n", regs.rsi);
 
+  printf("[HYDE] Restoring original data at 0x%llx and rerun\n", regs.rcx-(sizeof(payload)-1));
   char* host_ptr;
-  map_guest_pointer(details, host_ptr, regs.rcx-9);
+  map_guest_pointer(details, host_ptr, regs.rcx-(sizeof(payload)-1));
   memcpy(host_ptr, clobbered_data, sizeof(payload)-1);
   // Have hyde run a no-op syscall, and on return jump back to the original (now-restored) instruction
   // TODO: how can we keep the syscall in memory after the original is rerun? Single stepping?
-  details->custom_return = regs.rcx-9;
+  details->custom_return = regs.rcx-(sizeof(payload)-1);
   details->skip = true;
 }
 
