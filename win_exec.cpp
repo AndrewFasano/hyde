@@ -109,6 +109,28 @@ SyscCoroutine mytest(asid_details* details) {
     co_return;
   }
 
+  bool success;
+  // PART 1: Get process name
+  unsigned long fname_query_ret = yield_syscall(details, NtQueryInformationProcess,
+                -1, // Handle: -1 => self
+                27, // ProcessImageFileName
+                buffer,
+                0x1000,
+                0); // output size pointer - not using
+
+  char proc_name[512];
+  sprintf(proc_name, "error");
+  if (fname_query_ret == 0) {
+    unicode_string *name_struct;
+    map_guest_pointer(details, name_struct, buffer);
+    
+    wchar_t* name_w;
+    map_guest_pointer_status(details, name_w, name_struct->Buffer, &success);
+    if (success) {
+      wchar_to_char(proc_name, name_w, MIN(512, name_struct->Length));
+    }
+  }
+     
   stack[0] = 0; // Clobber it again - will get output size here
   unsigned long query_ret = yield_syscall(details, NtQueryInformationProcess,
                                           -1, // Handle: -1 => self
@@ -122,6 +144,7 @@ SyscCoroutine mytest(asid_details* details) {
   memcpy(stack, &old_stack, sizeof(long unsigned int)*2);
 
   if (query_ret == 0) {
+    // PART 2: Read library mappings
     process_basic_information *pbi;
     map_guest_pointer(details, pbi, buffer);
 
@@ -150,6 +173,13 @@ SyscCoroutine mytest(asid_details* details) {
     bool is_first = true;
 
     int sanity = 0;
+
+    printf("Asid 0x%8x PID %4ld PPID %4ld\n\tProcess name: '%s'\n",
+        details->asid,
+        (unsigned long)pbi->UniqueProcessId,
+        (unsigned long)pbi->InheritedFromUniqueProcessId,
+        proc_name);
+
     while (flink != first || is_first) {
       is_first = false;
 
@@ -167,17 +197,12 @@ SyscCoroutine mytest(asid_details* details) {
         // Last entry has null buffer?
         break;
       }
-      bool success;
       map_guest_pointer_status(details, dll_name_w, ldte->FullDllName.Buffer, &success);
       if (!success) {
-        printf("Unable to read DLL name at %lx\n", ldte->FullDllName.Buffer);
+        printf("\tunable to read DLL name at %lx\n", ldte->FullDllName.Buffer);
       } else {
         wchar_to_char(dll_name, dll_name_w, MIN(512, ldte->FullDllName.Length));
-        printf("Asid 0x%8x PID %4ld PPID %4ld has %16s loaded at 0x%lx\n",
-            details->asid,
-            (unsigned long)pbi->UniqueProcessId,
-            (unsigned long)pbi->InheritedFromUniqueProcessId,
-            dll_name, ldte->BaseAddress);
+        printf("\t%#16lx is base for %s\n", ldte->BaseAddress, dll_name);
       }
 
       // Update Flink
@@ -186,9 +211,6 @@ SyscCoroutine mytest(asid_details* details) {
       flink = *next_flink;
     }
   }
-
-
-  co_return;
 }
 
 #if 0
