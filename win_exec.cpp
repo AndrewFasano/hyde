@@ -7,71 +7,28 @@
 #include "windows.h"
 #define MIN(a, b) (a < b ? a : b)
 
-typedef unsigned char byte;
 
-typedef struct _list_entry {
-  uint32_t *Flink; // On a 64-bit guest, you'd think these would be bigger
-  uint32_t *Blink; // But they seem to really be 32-bit pointers
-} list_entry;
-
-//typedef struct  { // Official version?
-//    byte Reserved1[8];
-//    uint32_t Reserved2[3]; // XXX 32 or 64?
-//    list_entry InMemoryOrderModuleList;
-//} peb_ldr_data;
-//
-typedef struct  { // XP-based version?
-    uint32_t Length;
-    uint8_t Initialized[4];
-    uint32_t SsHandle;
-    list_entry InLoadOrder;
-    list_entry InMemOrder;
-    list_entry InInitOrder;
-} peb_ldr_data;
-
-typedef struct {
-  byte                          Reserved1[2];
-  byte                          BeingDebugged;
-  byte                          Reserved2[1];
-  void*                         Reserved3[2];
-  //char                          Ldr[8+(64*3)+(64*2)];
-  peb_ldr_data*                  Ldr;             // In XP this was at offset 0xC - same?
-  char                          ProcessParameters[100]; // XXX bad size
-  void*                         Reserved4[3];
-  void*                         AtlThunkSListPtr;
-  void*                         Reserved5;
-  unsigned long                 Reserved6;
-  void*                         Reserved7;
-  unsigned long                 Reserved8;
-  unsigned long                 AtlThunkSListPtr32;
-  void*                         Reserved9[45];
-  byte                          Reserved10[96];
-  char                          PostProcessInitRoutine[100]; //pps_post_process_init_routine
-  byte                          Reserved11[128];
-  void*                         Reserved12[1];
-  unsigned long                 SessionId;
-} peb;
-
-typedef struct {
-    list_entry InLoadOrderLinks;
-    list_entry InMemoryOrderLinks;
-    list_entry InInitializationOrderModuleList;
-    uint64_t BaseAddress;
-    uint64_t EntryPoint;
-    uint64_t Reserved;
-    unicode_string FullDllName;
-    unicode_string BaseDllName;
-} ldr_data_table_entry;
-
-
+#if 0
+// WIP - parse library
 typedef struct  {
-    long int ExitStatus;
-    peb* PebBaseAddress;
-    unsigned long* AffinityMask;
-    unsigned long BasePriority;
-    unsigned long* UniqueProcessId;
-    unsigned long* InheritedFromUniqueProcessId;
-} process_basic_information;
+    uint64_t   VirtualAddress;
+    uint64_t   Size;
+} image_data_directory;
+
+typedef struct _IMAGE_EXPORT_DIRECTORY {
+    uint64_t   Characteristics;
+    uint64_t   TimeDateStamp;
+    uint32_t   MajorVersion;
+    uint32_t   MinorVersion;
+    uint64_t   Name;
+    uint64_t   Base;
+    uint64_t   NumberOfFunctions;
+    uint64_t   NumberOfNames;
+    uint64_t   AddressOfFunctions;
+    uint64_t   AddressOfNames;
+    uint64_t   AddressOfNameOrdinals;
+} image_export_directory;
+#endif
 
 
 SyscCoroutine mytest(asid_details* details) {
@@ -148,11 +105,6 @@ SyscCoroutine mytest(asid_details* details) {
     process_basic_information *pbi;
     map_guest_pointer(details, pbi, buffer);
 
-    //printf("\nExitStatus %lx, Peb at %lx, PID %lx\n",
-    //    pbi->ExitStatus,
-    //    (unsigned long)pbi->PebBaseAddress,
-    //    (unsigned long)pbi->UniqueProcessId);
-
     peb *p;
     map_guest_pointer(details, p, pbi->PebBaseAddress);
     //printf("PEB -> LDR is at %lx\n", (unsigned long)p->Ldr);
@@ -160,19 +112,11 @@ SyscCoroutine mytest(asid_details* details) {
     peb_ldr_data *pld;
     map_guest_pointer(details, pld, p->Ldr);
 
-    //printf("PEB_LDR_DATA: InMemoryOrder Forward %lx, backwards %lx\n",
-    //    (long unsigned int)pld->InMemOrder.Flink,
-    //    (long unsigned int)pld->InMemOrder.Blink);
-
-    // XXX: something is broken down here - I suspect it's the offsets related
-    // to the linked list-> struct base resolution? for LDTE?
     ldr_data_table_entry *ldte;
 
-    long unsigned int flink = (long unsigned int)pld->InMemOrder.Flink;
+    long unsigned int flink = pld->InMemOrder.Flink;
     long unsigned int first = flink;
     bool is_first = true;
-
-    int sanity = 0;
 
     printf("Asid 0x%8x PID %4ld PPID %4ld\n\tProcess name: '%s'\n",
         details->asid,
@@ -183,32 +127,49 @@ SyscCoroutine mytest(asid_details* details) {
     while (flink != first || is_first) {
       is_first = false;
 
-      assert(sanity++ < 1000);
-      map_guest_pointer(details, ldte, flink);
+      map_guest_pointer(details, ldte, flink-0x10);
       char dll_name[512];
       wchar_t* dll_name_w;
 
-      //printf("FullDllName, length %x, max length %x buffer %lx\n",
-      //    ldte->FullDllName.Length,
-      //    ldte->FullDllName.MaximumLength,
-      //    ldte->FullDllName.Buffer);
-    
       if (ldte->FullDllName.Buffer == 0) {
         // Last entry has null buffer?
         break;
       }
-      map_guest_pointer_status(details, dll_name_w, ldte->FullDllName.Buffer, &success);
-      if (!success) {
-        printf("\tunable to read DLL name at %lx\n", ldte->FullDllName.Buffer);
-      } else {
-        wchar_to_char(dll_name, dll_name_w, MIN(512, ldte->FullDllName.Length));
-        printf("\t%#16lx is base for %s\n", ldte->BaseAddress, dll_name);
-      }
 
-      // Update Flink
+#if 0
+      printf("InLoadOrderLinks: Forward %lx, backward %lx\n", ldte->InLoadOrderLinks.Flink, ldte->InLoadOrderLinks.Blink);
+      printf("InMemOrderLinks: Forward %lx, backward %lx\n", ldte->InMemoryOrderLinks.Flink, ldte->InMemoryOrderLinks.Blink);
+      printf("InInitOrderLinks: Forward %lx, backward %lx\n", ldte->InInitializationOrderModuleList.Flink, ldte->InInitializationOrderModuleList.Blink);
+      printf("BaseAddress %lx\n", ldte->BaseAddress);
+      printf("FullDllName Length %x max %x Buf %lx\n", ldte->FullDllName.Length, ldte->FullDllName.MaximumLength, ldte->FullDllName.Buffer);
+      hexdump((char*)ldte, sizeof(*ldte));
+#endif
+
+      // Update Flink before end to simplify control flow
       long unsigned int *next_flink;
       map_guest_pointer(details, next_flink, flink);
       flink = *next_flink;
+
+      //FullDllName is the full path vs BaseDllName is just the filename
+
+      unicode_string base_name = ldte->BaseDllName;
+      map_guest_pointer_status(details, dll_name_w, base_name.Buffer, &success);
+      if (!success) {
+        printf("\tunable to read DLL name at %lx\n", ldte->BaseDllName.Buffer);
+        continue;
+      }
+
+      wchar_to_char(dll_name, dll_name_w, MIN(512, ldte->BaseDllName.Length));
+      uint64_t lib_base = ldte->BaseAddress;
+      //uint64_t lib_base = ldte->BaseAddress + p->ImageBaseAddress;
+      printf("\t%#16lx is base for %s\n", lib_base, dll_name);
+
+      if (strcmp(dll_name, "C:\\Windows\\System32\\KERNEL32.DLL") == 0) { // Should be case ins?
+        char* header;
+        // XXX we can't read this - do we need to map with syscalls?
+        map_guest_pointer(details, header, lib_base);
+        printf("HEADER: %c %c %c %c\n", header[0], header[1], header[2], header[3]);
+      }
     }
   }
 }

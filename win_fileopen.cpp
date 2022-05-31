@@ -16,7 +16,7 @@ SyscCoroutine closefile(asid_details* details) {
   std::tuple<int, int> current = std::make_pair((unsigned)details->asid, (unsigned)regs.r10);
 
   if (seen_handles.contains(current)) {
-    printf("Asid %x closes handle %llx\n", details->asid, regs.r10);
+    //printf("Asid %x closes handle %llx\n", details->asid, regs.r10);
     seen_handles.erase(current);
   }
 }
@@ -37,7 +37,7 @@ SyscCoroutine openfile(asid_details* details) {
   bool success;
   map_guest_pointer_status(details, handle, regs.r10, &success);
   if (!success) {
-    printf("Could not dereference handle pointer at %llx. Bail\n", regs.r10);
+    //printf("Could not dereference handle pointer at %llx. Bail\n", regs.r10);
     co_return;
   }
   char open_name[512];
@@ -50,7 +50,7 @@ SyscCoroutine openfile(asid_details* details) {
   wchar_t* path;
   map_guest_pointer_status(details, oa_struct, regs.r8, &success);
   if (!success) {
-    printf("Could not map r8 at %llx to an object_attributes struct\n", regs.r8);
+    //printf("Could not map r8 at %llx to an object_attributes struct\n", regs.r8);
     goto inject;
   }else{
 #if 0
@@ -68,7 +68,8 @@ SyscCoroutine openfile(asid_details* details) {
 
   map_guest_pointer_status(details, path_struct, oa_struct->ObjectName, &success);
   if (!success) {
-    printf("Could not map object name at %lx\n", (unsigned long)oa_struct->ObjectName); goto inject;
+    //printf("Could not map object name at %lx\n", (unsigned long)oa_struct->ObjectName);
+    goto inject;
   }
 
 #if 0
@@ -78,8 +79,8 @@ SyscCoroutine openfile(asid_details* details) {
 
   map_guest_pointer_status(details, path, path_struct->Buffer, &success);
   if (!success) {
-    printf("Could not map object buffer with length %u at %lx\n",
-        path_struct->Length, (unsigned long)path_struct->Buffer);
+    //printf("Could not map object buffer with length %u at %lx\n",
+    //    path_struct->Length, (unsigned long)path_struct->Buffer);
     goto inject;
    }
   // Convert the windows wide char* to a linux c char* with our helper function
@@ -117,7 +118,7 @@ inject:
   //  4) read new values
   //  5) restore original values
 
-  long unsigned int old_stack[2];
+  unsigned int old_stack[2];
   map_guest_pointer(details, stack, regs.rsp);
 
   // Save original values
@@ -125,7 +126,7 @@ inject:
 
   // Clobber
   stack[0] = 0; // Args[1] points here for in/out BaseAddress. Input is 0, output is buffer
-  stack[1] = 0x3000; // Args[3] points here for RegionSize
+  stack[1] = 0x1000; // Args[3] points here for RegionSize
 
   // Run the syscall - which will modify these stack-based values
   unsigned long allocate_ret = yield_syscall(details, NtAllocateVirtualMemory,
@@ -146,7 +147,7 @@ inject:
 
   unsigned long int buffer = stack[0];
   // Restore clobbered things from the stack
-  memcpy(stack, &old_stack, sizeof(long unsigned int)*3);
+  memcpy(stack, &old_stack, sizeof(long unsigned int)*2);
 
   if (allocate_ret == 0 && success) {
     unsigned long query_ret = yield_syscall(details, NtQueryInformationProcess,
@@ -168,34 +169,15 @@ inject:
         if (!open_failed) {
           std::tuple<int, int> current = std::make_pair((unsigned)details->asid, (unsigned)*handle);
           seen_handles.insert(current);
-          printf("Asid %x is program '%s'\n\tOpens file '%s'\n\tGiven handle %x\n",
-             details->asid, c_name, open_name, *handle);
+          //printf("Asid %x is program '%s'\n\tOpens file '%s'\n\tGiven handle %x\n",
+          //   details->asid, c_name, open_name, *handle);
         }else{
-          printf("Asid %x is program: '%s'\n\tFailed to open file '%s'\n\tGiven handle %x\n",
-              details->asid, c_name, open_name, *handle);
+          //printf("Asid %x is program: '%s'\n\tFailed to open file '%s'\n\tGiven handle %x\n",
+          //    details->asid, c_name, open_name, *handle);
         }
       }
-#if 0
-      printf("Output size is %lx\n", stack[1]);
-
-      typedef struct {
-        int ExitStatus;
-        int* PebBaseAddress;
-        unsigned int* AffinityMask;
-        int BasePriority;
-        unsigned int* UniqueProcessId; // Not really a pointer
-        unsigned int* InheritedFromUniqueProcessId; // Not really a pointer
-      } process_basic_information;
-
-
-      process_basic_information* info;
-      map_guest_pointer(details, info, buffer);
-      printf("Exit Status: 0x%x and BasePrio: 0x%x\n", info->ExitStatus, info->BasePriority);
-      printf("PebBase: 0x%lx PID  0x%lx\n", (unsigned long int)info->PebBaseAddress,
-              (unsigned long int)info->UniqueProcessId);
-#endif
     }else{
-      printf("Query returned %lx\n", query_ret);
+      //printf("Query returned %lx\n", query_ret);
     }
   }
 
@@ -205,7 +187,7 @@ inject:
     memcpy(&old_stack, stack, sizeof(long unsigned int)*2);
     // Clobber
     stack[0] = buffer;
-    stack[1] = 0;
+    stack[1] = 0x1000;
 
     get_regs_or_die(details, &regs);
 
@@ -217,7 +199,7 @@ inject:
 
     unsigned long out_buf = stack[0];
     if (free_ret != 0) {
-      printf("WARNING: returns %lx with out_buf %lx\n", free_ret, out_buf);
+      printf("WARNING: free returns %lx with out_buf %lx\n", free_ret, out_buf);
     }
     memcpy(stack, &old_stack, sizeof(long unsigned int)*2);
   }
