@@ -7,30 +7,6 @@
 #include "windows.h"
 #define MIN(a, b) (a < b ? a : b)
 
-
-#if 0
-// WIP - parse library
-typedef struct  {
-    uint64_t   VirtualAddress;
-    uint64_t   Size;
-} image_data_directory;
-
-typedef struct _IMAGE_EXPORT_DIRECTORY {
-    uint64_t   Characteristics;
-    uint64_t   TimeDateStamp;
-    uint32_t   MajorVersion;
-    uint32_t   MinorVersion;
-    uint64_t   Name;
-    uint64_t   Base;
-    uint64_t   NumberOfFunctions;
-    uint64_t   NumberOfNames;
-    uint64_t   AddressOfFunctions;
-    uint64_t   AddressOfNames;
-    uint64_t   AddressOfNameOrdinals;
-} image_export_directory;
-#endif
-
-
 SyscCoroutine mytest(asid_details* details) {
   // Testing on file open - get PEB, print modules, then run orig syscall
   struct kvm_regs regs;
@@ -45,13 +21,13 @@ SyscCoroutine mytest(asid_details* details) {
   memcpy(&old_stack, stack, sizeof(long unsigned int)*2);
 
   // Clobber
-  stack[0] = 0; // Args[1] points here for in/out BaseAddress. Input is 0, output is buffer
+  stack[0] = 0; // Args[1] points here for in/out DllBase. Input is 0, output is buffer
   stack[1] = 0x1000; // Args[3] points here for RegionSize
 
   // Run the syscall - which will modify these stack-based values
   unsigned long allocate_ret = yield_syscall(details, NtAllocateVirtualMemory,
                 -1,         // Handle: -1 => self
-                regs.rsp,   // void** in out BaseAddress->ActualAddress
+                regs.rsp,   // void** in out DllBase->ActualAddress
                 0,          //
                 regs.rsp+8, // int* in out requested size -> allocated size
                 0x1000,     // Allocation type = MEM_COMMIT|MEM_RESERVE
@@ -140,18 +116,17 @@ SyscCoroutine mytest(asid_details* details) {
       printf("InLoadOrderLinks: Forward %lx, backward %lx\n", ldte->InLoadOrderLinks.Flink, ldte->InLoadOrderLinks.Blink);
       printf("InMemOrderLinks: Forward %lx, backward %lx\n", ldte->InMemoryOrderLinks.Flink, ldte->InMemoryOrderLinks.Blink);
       printf("InInitOrderLinks: Forward %lx, backward %lx\n", ldte->InInitializationOrderModuleList.Flink, ldte->InInitializationOrderModuleList.Blink);
-      printf("BaseAddress %lx\n", ldte->BaseAddress);
+      printf("DllBase %lx\n", ldte->DllBase);
       printf("FullDllName Length %x max %x Buf %lx\n", ldte->FullDllName.Length, ldte->FullDllName.MaximumLength, ldte->FullDllName.Buffer);
       hexdump((char*)ldte, sizeof(*ldte));
 #endif
 
-      // Update Flink before end to simplify control flow
+      // Update next flink before end to simplify control flow
       long unsigned int *next_flink;
       map_guest_pointer(details, next_flink, flink);
       flink = *next_flink;
 
       //FullDllName is the full path vs BaseDllName is just the filename
-
       unicode_string base_name = ldte->BaseDllName;
       map_guest_pointer_status(details, dll_name_w, base_name.Buffer, &success);
       if (!success) {
@@ -160,79 +135,88 @@ SyscCoroutine mytest(asid_details* details) {
       }
 
       wchar_to_char(dll_name, dll_name_w, MIN(512, ldte->BaseDllName.Length));
-      uint64_t lib_base = ldte->BaseAddress;
-      //uint64_t lib_base = ldte->BaseAddress + p->ImageBaseAddress;
-      printf("\t%#16lx is base for %s\n", lib_base, dll_name);
+      //printf("\t%#16lx is base for %s\n", ldte->DllBase, dll_name);
 
-      if (strcmp(dll_name, "C:\\Windows\\System32\\KERNEL32.DLL") == 0) { // Should be case ins?
-        char* header;
-        // XXX we can't read this - do we need to map with syscalls?
-        map_guest_pointer(details, header, lib_base);
-        printf("HEADER: %c %c %c %c\n", header[0], header[1], header[2], header[3]);
+			// TODO make comparison case insensitive
+      //if (strcmp(dll_name, "C:\\Windows\\System32\\KERNEL32.DLL") == 0) {
+      if (strcmp(dll_name, "C:\\Windows\\System32\\user32.dll") == 0) {
+        printf("\tDLLbase: %#16lx for %s\n", ldte->DllBase, dll_name);
+
+        // PARSE STAGE: Map _IMAGE_DOS_HEADER from the DllBase
+        char* mz;
+        map_guest_pointer(details, mz, ldte->DllBase);
+				assert((mz[0] = 'M') && (mz[1] = 'Z')); // Found the PE file in memory!
+
+        // PARSE STAGE: Map _IMAGE_NT_HEADERS from DllBase + DOS Header's e_lfanew
+        uint32_t *e_lfanew;
+        map_guest_pointer(details, e_lfanew, ldte->DllBase+0x3c); // Points to where the NT header is, 4 bytes
+
+        // Get the first word out of OptionalHeader *before* we cast the full struct - we need this Magic to decide on 32/64 bit structs
+        uint16_t* magic;
+        map_guest_pointer(details, magic, ldte->DllBase + (*e_lfanew) + sizeof(image_file_header) + sizeof(uint32_t));
+        printf("Magic: 0x%x\n", *magic);
+
+        assert(*magic == 0x20b); // For now we just support PE32+ executables, which use image_nt_header64
+
+        image_nt_headers64 *header;
+        //image_nt_headers32 *header;
+        map_guest_pointer(details, header, ldte->DllBase + (*e_lfanew));
+
+        printf("NT HEADERS:\n\tMagic 0x%x\n\tMachine is 0x%x\n\tSubsystem %x\n\tTimeStamp %x\n",
+            header->OptionalHeader.Magic,
+            header->FileHeader.Machine,
+            header->OptionalHeader.Subsystem,
+            header->FileHeader.TimeDateStamp);
+
+        printf("\tSizeOfHeapCommit 0x%lx\nLoader Flags 0x%x\n\tNumber RVA & Sizes 0x%x\n",
+            header->OptionalHeader.SizeOfHeapCommit, 
+            header->OptionalHeader.LoaderFlags, 
+            header->OptionalHeader.NumberOfRvaAndSizes);
+
+        for (int i=0; i < 16; i++) {
+          image_data_directory img_dd = header->OptionalHeader.DataDirectory[i];
+          printf("\tDataDir[%d] VA is %#8x Offset with +DLB is %#8lx sz is %x\n", i, img_dd.VirtualAddress, img_dd.VirtualAddress + ldte->DllBase, img_dd.Size);
+        }
+
+        // PARSE STAGE: Parse exports DataDirectory to get function info
+        image_data_directory img_dd0 = header->OptionalHeader.DataDirectory[0];
+        image_export_directory *ied;
+        map_guest_pointer(details, ied, (uint64_t)img_dd0.VirtualAddress + ldte->DllBase);
+
+        printf("We have %x names starting at %x and %x functions starting at %x\n",
+            ied->NumberOfNames,
+            ied->AddressOfNames,
+            ied->NumberOfFunctions,
+            ied->AddressOfFunctions);
+
+        // PARSE STAGE: Use exports to get function name -> Address mappings
+        // Resource: https://resources.infosecinstitute.com/topic/the-export-directory/
+        uint32_t *name_arr;
+        map_guest_pointer(details, name_arr, ied->AddressOfNames + ldte->DllBase);
+
+        uint32_t *addr_arr;
+        map_guest_pointer(details, addr_arr, ied->AddressOfFunctions + ldte->DllBase);
+
+        uint16_t *ordn_arr;
+        map_guest_pointer(details, ordn_arr, ied->AddressOfNameOrdinals + ldte->DllBase);
+
+        for (int i=0; i < ied->NumberOfNames; i++) {
+          // Get i-th name
+          char* f_name;
+          map_guest_pointer_status(details, f_name, ldte->DllBase + name_arr[i], &success);
+          if (!success) {
+            continue;
+          }
+
+          // Look up address using ordinal
+          uint32_t f_addr = addr_arr[ordn_arr[i]];
+
+          printf("Name %03d: Ordinal %#03x: %s at 0x%x => %lx\n", i, ordn_arr[i], f_name, f_addr, f_addr + ldte->DllBase);
+        }
       }
     }
   }
 }
-
-#if 0
-SyscCoroutine openproc(asid_details* details) {
-
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
-
-  // We will run the originally-requested syscall early here,
-  // But first we'll extract the object_attributes struct from arg 3:
-
-  object_attributes *oa_struct;
-  unicode_string* path_struct;
-  bool success;
-  wchar_t* path;
-  map_guest_pointer_status(details, oa_struct, regs.r8, &success);
-  if (!success) {
-    printf("Could not map r8 at %llx to an object_attributes struct\n", regs.r8);
-    goto inject;
-  }
-
-  printf("Object_attributes (%ld bytes):\n\tLength = 0x%lx\n\tRootDirectory = 0x%lx\n\tObjectName = 0x%lx\n\tAttributes = 0x%lx\n\tSecurityDescriptor = 0x%lx\n\tSecurityQoS = %lx\n",
-      sizeof(object_attributes),
-      (unsigned long)oa_struct->Length,
-      (unsigned long)oa_struct->RootDirectory,
-      (unsigned long)oa_struct->ObjectName,
-      (unsigned long)oa_struct->Attributes,
-      (unsigned long)oa_struct->SecurityDescriptor,
-      (unsigned long)oa_struct->SecurityQualityOfService
-      );
-
-  map_guest_pointer_status(details, path_struct, oa_struct->ObjectName, &success);
-  if (!success) {
-    printf("Could not map object_attribts->ObjectName at %lx\n", (unsigned long)oa_struct->ObjectName);
-    goto inject;
-  }
-  map_guest_pointer_status(details, path, path_struct->Buffer, &success);
-  if (!success) {
-    printf("Could not map object buffer with length %u at %lx\n",
-        path_struct->Length, (unsigned long)path_struct->Buffer);
-    goto inject;
-   }
-  // Convert the windows wide char* to a linux c char* with our helper function
-  char open_name[512];
-  wchar_to_char(open_name, path, MIN(512, path_struct->Length));
-
-
-inject:
-  // Injected the requested syscall *now*, not when this co-opter finishes
-  unsigned long int open_return = yield_syscall(details, NtOpenProcess,
-                                                regs.r10, regs.rdx,
-                                                regs.r8, regs.r9);
-                                                
-
-  // We already ran the requested syscall, don't run it again
-  details->skip = true;
-  details->orig_regs.rax = open_return;
-
-  co_return;
-}
-#endif
 
 create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
   switch (callno) {
