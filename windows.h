@@ -218,7 +218,7 @@ inline void hexdump(char* buf, size_t length) {
     if (i % 16 == 0) {
       printf("[%lx]\t", i);
     }
-    printf("%2x ", buf[i]&0xff);
+    printf("%02x ", buf[i]&0xff);
   }
   printf("\n-------------\n");
 }
