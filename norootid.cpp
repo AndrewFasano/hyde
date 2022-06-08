@@ -12,13 +12,19 @@ SyscCoroutine start_coopter(asid_details* details) {
   map_guest_pointer(details, fname, get_arg(regs, 0));
 
   printf("[NoRootID] SYS_exec(%s)\n", fname);
-  __u64 uid = yield_syscall(details, __NR_getuid);
+  __u64 uid = yield_syscall(details, __NR_getuid); // callno102
 
   if (uid != 0) {
-    __u64 pid = yield_syscall(details, __NR_getpid);
+    __u64 pid = yield_syscall(details, __NR_getpid); // callno=39
     printf("[NoRootID]: Non-root process! UID is %lld PID is %lld\n", uid, pid);
   }
+
+  // When we yield the original execve, we lose control over the process because
+  // it returns into the child process
+  co_yield *(details->orig_syscall); // callno=59
+  // Subsequent code won't run because it's execve
 }
+
 create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
   if (callno == __NR_execve)
     return &start_coopter;

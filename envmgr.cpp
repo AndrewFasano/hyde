@@ -78,11 +78,9 @@ SyscCoroutine start_coopter(asid_details* details) {
   map_guest_pointer(details, newenvp,&guest_buf[i+1]);
   *newenvp = (char*)0;
 
-  // Finally: when HyDE goes to restore the original syscall, we *don't* want
-  // to use the old arg2 (envp) value, but instead our new buffer.
-  // Note these have to happen at the very end, otherwise subsequent injects will clobber
-  set_ARG2(details->orig_regs, (__u64)guest_buf);
-  details->modify_original_args = true;
+  // Finally, we run the original (execve) syscall, but with a different arg2 pointing to our buffer
+  details->orig_syscall->args[2] = (__u64)guest_buf;
+  co_yield *(details->orig_syscall); // noreturn
 }
 
 create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
