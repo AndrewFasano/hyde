@@ -16,8 +16,7 @@
 static char* last_libname = NULL;
 static unsigned long last_puts = 0;
 
-//static char payload[] = "\x48\xC7\xC0\x0D\x00\x00\x00\x0F\x01\xC1"
-static char payload[] = "\x48\xC7\xC0\xFF\xFF\x00\x00\x0F\x05"; // syscall with rax=0xffff
+static char payload[] = "\x50\x48\xC7\xC0\xFF\xFF\x00\x00\x0F\x05"; // Push rax, rax=0xffff, syscall
 static char clobbered_data[sizeof(payload)];
 
 
@@ -245,13 +244,31 @@ SyscCoroutine start_coopter_custom(asid_details* details) {
   else          printf("[HYDE]    Arg 1: Could not read %llx\n", regs.rsi);
 
   printf("[HYDE] Restoring original data at 0x%llx and rerun\n", regs.rcx-(sizeof(payload)-1));
+
+  // Pop saved RAX off stack
+  unsigned long* stack;
+  map_guest_pointer(details, stack, regs.rsp);
+  details->orig_regs.rax = stack[0];
+  details->orig_regs.rsp += 8;
+
   char* host_ptr;
   map_guest_pointer(details, host_ptr, regs.rcx-(sizeof(payload)-1));
   memcpy(host_ptr, clobbered_data, sizeof(payload)-1);
   // Have hyde run a no-op syscall, and on return jump back to the original (now-restored) instruction
   // TODO: how can we keep the syscall in memory after the original is rerun? Single stepping?
+
+  // XXX: jump back to original PC: read out of RCX, decrement by the payload size +1
   details->custom_return = regs.rcx-(sizeof(payload)-1);
-  details->skip = true;
+  printf("Revert to restored data at %lx\n", details->custom_return);
+
+  // XXX WIP: enable CPU TF - then run a no-op to make it stick (could move change into here?)
+  //enable_singlestep(details);
+  //yield_syscall(details, __NR_getuid); // Junk
+
+  // We're *before* the final update to CPU
+  //details->orig_regs.rflags |= 0x100; // Set TF bit
+
+  yield_syscall(details, __NR_getuid); // Junk syscall - need this at the end, otherwise some of our changes don't take? (not sure which?)
 }
 
 create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
