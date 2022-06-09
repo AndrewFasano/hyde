@@ -13,14 +13,29 @@
 //#define TARG_F "strrchr"
 //#define TARG_F "puts"
 
-static char* last_libname = NULL;
-static unsigned long last_puts = 0;
+// TODO: need to make these dynamic, per-asid
+// but they probably should work!
 
-static char payload[] = "\x50\x48\xC7\xC0\xFF\xFF\x00\x00\x0F\x05"; // Push rax, rax=0xffff, syscall
+static char* last_libname = NULL;
+static unsigned long last_match_addr = 0;
+
+//static char payload[] = "\x50\x48\xC7\xC0\xFF\xFF\x00\x00\x0F\x05"; // Push rax, rax=0xffff, syscall
+//static char payload2[] = "\x50\x48\xC7\xC0\xFE\xFF\x00\x00\x0F\x05"; // Push rax, rax=0xfffe, syscall
+
+static char payload[] = "\x0f\x05";
+static char payload2[] = "\x0f\x05";
+
 static char clobbered_data[sizeof(payload)];
+static char clobbered_data2[sizeof(payload)];
+
+static unsigned long int hookedA = 0;
+static unsigned long int hookedB = 0;
 
 
 SyscCoroutine start_coopter_open(asid_details* details) {
+  if (hookedB != 0) {
+    co_return;
+  }
   // Get guest registers so we can examine the first argument
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
@@ -42,11 +57,10 @@ SyscCoroutine start_coopter_open(asid_details* details) {
       co_return;
   }
 
-  //printf("[HYDE] Saw open of a library: %s\n", host_targname);
+  //printf("Saw open of a library: %s\n", host_targname);
   if (last_libname != NULL)
     free(last_libname);
   last_libname = strdup(host_targname);
-
 }
 
 SyscCoroutine start_coopter_mmap(asid_details* details) {
@@ -67,13 +81,18 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
 
   // Let's yield the original syscall, then skip it later
   // This way we can analyze the data before the guest continues
-  __u64* guest_buf = (__u64*)yield_syscall(details, __NR_mmap,
-      get_arg(regs, 0), get_arg(regs, 1), get_arg(regs, 2),
-      get_arg(regs, 3), get_arg(regs, 4), get_arg(regs, 5));
+
+  //__u64* guest_buf = (__u64*)yield_syscall(details, __NR_mmap,
+  //    get_arg(regs, 0), get_arg(regs, 1), get_arg(regs, 2),
+  //    get_arg(regs, 3), get_arg(regs, 4), get_arg(regs, 5));
+
+  co_yield *(details->orig_syscall);
+  __u64* guest_buf = (__u64*)details->retval;
 
   char* host_data;
   map_guest_pointer(details, host_data, guest_buf);
 
+  bool already_bkpt = false;
   if (memcmp(host_data, "\x7F" "ELF", 4) == 0) {
     Elf64_Ehdr ehdr;
     memcpy(&ehdr, host_data, sizeof(ehdr)); // Hoping it doesn't change pages
@@ -168,7 +187,7 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
       char* strtabs;
 
       if (numelements > 0x1000) {
-        printf("[HYDE] Warning: found too many elements - ignoring\n");
+        printf("Warning: found too many elements - ignoring\n");
       }else if (numelements > 0) {
         for (int i=0; i < numelements; i++) {
           Elf64_Sym *onesymtab;
@@ -179,9 +198,31 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
             __u64 sym_addr = (__u64)guest_buf + onesymtab->st_value;
             //printf("%llx: %s\n", sym_addr, sym_name);
 
-            if (strcmp(sym_name, TARG_F) == 0 && sym_addr != last_puts){
-              printf("[HYDE] \tFound %s at %llx\n", TARG_F, sym_addr);
-              last_puts = sym_addr;
+            if (strcmp(sym_name, TARG_F) == 0 && sym_addr != last_match_addr){
+              printf("Found symbol %s at %llx in asid %x\n", TARG_F, sym_addr, details->asid);
+
+              char *target_data;
+              bool success;
+
+              map_guest_pointer_status(details, target_data, sym_addr, &success);
+              if (success) {
+                printf("\tMap symbol success=%d, data=", success);
+                for (int i=0; i < 10; i++) {
+                  printf("%02x ", target_data[i]&0xff);
+                }
+                puts("");
+
+                if (memcmp(target_data, payload, sizeof(payload)-1) != 0) {
+                  printf("New data\n");
+                  last_match_addr = sym_addr;
+                } else {
+                  printf("Already bkpt at %llx hookedA is %lx\n", sym_addr, hookedA);
+                  already_bkpt = true;
+                  hookedA = sym_addr+2; // XXX this is bad - these addresses can shift around!
+                }
+              } else {
+                printf("\tFailed to map symbol\n");
+              }
             }
           }
         }
@@ -190,22 +231,24 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
   }
 
   if (prot & PROT_EXEC) {
-    if (last_puts != 0 && (__u64)guest_buf < last_puts) {
+    if (last_match_addr != 0 && (__u64)guest_buf < last_match_addr) {
       char* target_data;
       bool success;
-      map_guest_pointer_status(details, target_data, last_puts, &success);
+      map_guest_pointer_status(details, target_data, last_match_addr, &success);
       if (success) {
         if (memcmp(target_data, payload, sizeof(payload)-1) != 0) {
 
-          printf("[HyDE] Rewriting %s in memory at %lx to add syscall\n", TARG_F, last_puts);
-
+          // Store hookedA as end of layer1
+          printf("Insert layer1 at %lx and store as hookedA\n", last_match_addr);
+          hookedA = last_match_addr+2;
           // Store data we clobber and then log it
           memcpy(clobbered_data, target_data, sizeof(payload)-1);
-          printf("[HYDE] Clobbering %ld bytes of data: ", sizeof(payload)-1);
-          for (int i=0; i < sizeof(payload)-1; i++) {
+
+          printf("\tClobbering %ld bytes of data: ", sizeof(payload)-1);
+          for (int i=0; i < 10; i++) {
             printf("%02x ", target_data[i]&0xff);
           }
-          printf("\n[HYDE]              with new data: ");
+          printf("\n\t             with new data: ");
           for (int i=0; i < sizeof(payload)-1; i++) {
             printf("%02x ", payload[i]&0xff);
           }
@@ -213,71 +256,193 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
 
           // Clobber the data
           memcpy(target_data, payload, sizeof(payload)-1);
+        } else {
+          //printf("Looks like there's already a syscall (of ours?) in place\n");
         }
-      }else{
-        printf("Failed to map guest pointer for symbol: %lx\n", last_puts);
+      //} else if (!already_bkpt) {
+      //  // XXX not working?
+      //  printf("Failed to map guest pointer for symbol: %lx\n", last_match_addr);
       }
     }
   }
 
-  // restore all regs, then set desired return value
-  details->skip = true;
-  memcpy(&details->orig_regs, &regs, sizeof(regs));
-  set_RET(details->orig_regs, (__u64)guest_buf);
+  // Ensure correct RV is set
+  details->orig_regs.rax = (__u64)guest_buf;
 }
 
-SyscCoroutine start_coopter_custom(asid_details* details) {
+
+extern "C" int kvm_insert_breakpoint(void *cpu, unsigned long addr, unsigned long len, int type);
+
+// We effectively use two breakpoint to do a single-step after the first one is hit
+// so we can restore it. SC1 is the real syscall, while Sc2 is just our helper
+
+// Orig 1   Setup Sc1         ->Orig 1              Setup Sc1
+// Orig 2   Setup Sc1           Orig 2              Setup Sc1
+// Orig 3   Syscall     *hit*   Orig 3              Syscall1
+// Orig 4   Orig 4              Setup Sc2         ->Orig 4
+// Orig 5   Orig 5              Setup Sc2           Orig 5
+// Orig 6   Orig 6              Syscall     *hit*   Orig 6
+
+SyscCoroutine start_coopter_custom2(asid_details* details) {
   // Get guest registers so we can examine the first argument
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
-  printf("[HYDE] Call to %s detected at PC %llx\n", TARG_F, regs.rcx);
+  unsigned long int layer1pc = regs.rcx-(sizeof(payload2)+sizeof(payload)-2);
+  printf(">>> Hit layer2 breakpoint at PC %llx, layer 1 is at %lx\n", regs.rcx, layer1pc);
 
-  char* s;
+  char* target_data;
   bool success;
-  // Arg0: RDI
-  map_guest_pointer_status(details, s, regs.rdi, &success);
-  if (success) printf("[HYDE]    Arg 0: %s\n", s);
-  else         printf("[HYDE]    Arg 0: Could not read %llx\n", regs.rdi);
+  hookedB = 0; // No longer have layer2 hook
+  map_guest_pointer_status(details, target_data, layer1pc, &success);
+  if (success) {
+    if (memcmp(target_data, payload, sizeof(payload)-1) != 0) {
 
-  map_guest_pointer_status(details, s, regs.rsi, &success);
-  if (success)  printf("[HYDE]    Arg 1: %s\n", s);
-  else          printf("[HYDE]    Arg 1: Could not read %llx\n", regs.rsi);
+      // Store hookedA as end of layer1
+      printf("REInsert layer1 at %lx\n", layer1pc);
+      hookedA = layer1pc+2;
+      // Store data we clobber and then log it
+      memcpy(clobbered_data, target_data, sizeof(payload)-1);
 
-  printf("[HYDE] Restoring original data at 0x%llx and rerun\n", regs.rcx-(sizeof(payload)-1));
+      printf("\tClobbering %ld bytes of data: ", sizeof(payload)-1);
+      for (int i=0; i < 10; i++) {
+        printf("%02x ", target_data[i]&0xff);
+      }
+      printf("\n\t             with new data: ");
+      for (int i=0; i < sizeof(payload)-1; i++) {
+        printf("%02x ", payload[i]&0xff);
+      }
+      printf("\n");
 
-  // Pop saved RAX off stack
+      // Clobber the data
+      memcpy(target_data, payload, sizeof(payload)-1);
+    }
+  }else{
+    printf("Failed to map guest pointer for symbol: %lx\n", layer1pc);
+  }
+
+  printf("Restoring original layer2 data at 0x%llx and rerun\n", regs.rcx-(sizeof(payload2)-1));
+
+#if 0
+  // Pop saved RAX off stack - not anymore
   unsigned long* stack;
   map_guest_pointer(details, stack, regs.rsp);
   details->orig_regs.rax = stack[0];
   details->orig_regs.rsp += 8;
+#endif
+
+  char* host_ptr;
+  map_guest_pointer(details, host_ptr, regs.rcx-(sizeof(payload2)-1));
+  memcpy(host_ptr, clobbered_data2, sizeof(payload2)-1);
+  // Have hyde run a no-op syscall, and on return jump back to the original (now-restored) instruction
+
+  // Jump back to original PC: read out of RCX, decrement by the payload size +1
+  details->custom_return = regs.rcx-(sizeof(payload2)-1);
+  printf("Revert2 to restored data at %lx\n", details->custom_return);
+
+  // Do we need this?
+  yield_syscall(details, __NR_getuid); // Junk syscall - need this at the end, otherwise some of our changes don't take? (not sure which?)
+}
+
+SyscCoroutine start_coopter_custom(asid_details* details) {
+  // Layer 1 breakpoint
+
+  // Get guest registers so we can examine the first argument
+  struct kvm_regs regs;
+  get_regs_or_die(details, &regs);
+
+  char* s;
+  bool success;
+  // Arg0: RDI
+  char arg0[64];
+  char arg1[64];
+  map_guest_pointer_status(details, s, regs.rdi, &success);
+  if (success) sprintf(arg0, "%s", s);
+  else         sprintf(arg0, "[Could not read %llx]", regs.rdi);
+
+  map_guest_pointer_status(details, s, regs.rsi, &success);
+  if (success)  sprintf(arg1, "%s", s);
+  else          sprintf(arg1, "[Could not read %llx]", regs.rsi);
+
+  printf(">>> Hit hook at %llx: %s(%s, %s) original RAX is %llx\n", regs.rcx, TARG_F, arg0, arg1, regs.rax);
+
+  printf("Restoring original data at 0x%llx and rerun\n", regs.rcx-(sizeof(payload)-1));
+
+#if 0
+  // Pop saved RAX off stack - Not anymore!
+  unsigned long* stack;
+  map_guest_pointer(details, stack, regs.rsp);
+  details->orig_regs.rax = stack[0];
+  details->orig_regs.rsp += 8;
+#endif
 
   char* host_ptr;
   map_guest_pointer(details, host_ptr, regs.rcx-(sizeof(payload)-1));
   memcpy(host_ptr, clobbered_data, sizeof(payload)-1);
   // Have hyde run a no-op syscall, and on return jump back to the original (now-restored) instruction
-  // TODO: how can we keep the syscall in memory after the original is rerun? Single stepping?
 
-  // XXX: jump back to original PC: read out of RCX, decrement by the payload size +1
+  // Jump back to original PC: read out of RCX, decrement by the payload size +1
   details->custom_return = regs.rcx-(sizeof(payload)-1);
-  printf("Revert to restored data at %lx\n", details->custom_return);
+
+  printf("Insert breakpoint2 at %llx\n", regs.rcx);
+  char* target_data2;
+  map_guest_pointer_status(details, target_data2, regs.rcx, &success);
+  hookedB = regs.rcx+2;
+
+  if (success) {
+    // Store data we clobber and then log it
+    memcpy(clobbered_data2, target_data2, sizeof(payload2)-1);
+    printf("\tClobbering %ld bytes of data: ", sizeof(payload2)-1);
+    for (int i=0; i < 10; i++) {
+      printf("%02x ", target_data2[i]&0xff);
+    }
+    printf("\n\t             with new data: ");
+    for (int i=0; i < sizeof(payload2)-1; i++) {
+      printf("%02x ", payload2[i]&0xff);
+    }
+    printf("\n");
+    // Clobber the data
+    memcpy(target_data2, payload2, sizeof(payload2)-1);
+  }else{
+    printf("Failed to insert\n");
+  }
+  printf("\n");
+
+  printf("Revert to restored layer1 at %lx\n", details->custom_return);
+
+#if 0
+  // TODO: how can we keep the syscall in memory after the original is rerun? Single stepping?
+  // Set breakpoint on instruction just *after* clobbered data
+  int rv = kvm_insert_breakpoint(details->cpu, regs.rcx, /*size=*/1, /*type=GDB_BREAKPOINT_HW*/1);
+  if (rv !=0 ) {
+    printf("Error inserting bp: %d\n", rv);
+  }
 
   // XXX WIP: enable CPU TF - then run a no-op to make it stick (could move change into here?)
-  //enable_singlestep(details);
   //yield_syscall(details, __NR_getuid); // Junk
 
-  // We're *before* the final update to CPU
-  //details->orig_regs.rflags |= 0x100; // Set TF bit
+  //enable_singlestep(details); // With this set, we get a trap *BEFORE* we hit the RCX (post-clobber) address
 
+  //details->orig_regs.rflags |= 0x100; // Set TF bit - necessary for bkpt to trigger??
+
+#endif
+  // Do we need this?
   yield_syscall(details, __NR_getuid); // Junk syscall - need this at the end, otherwise some of our changes don't take? (not sure which?)
 }
 
-create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
+create_coopt_t* should_coopt(void*cpu, long unsigned int callno, long unsigned int pc) {
+  //printf("Syscall at %lx\n", pc);
+
   if (callno == __NR_open || callno == __NR_openat) {
     return &start_coopter_open;
   }else if (callno == __NR_mmap) {
     return &start_coopter_mmap;
-  }else if (callno == 0xFFFF) {
-    return &start_coopter_custom;
   }
+
+  if (pc == hookedA) {
+    return &start_coopter_custom;
+  }else if (pc == hookedB) {
+    return &start_coopter_custom2;
+  }
+
   return NULL;
 }
