@@ -16,6 +16,8 @@
 // We effectively use two breakpoint to do a single-step after the first one is hit
 // so we can restore it. SC1 is the real syscall, while Sc2 is just our helper
 
+// **** Options *****/
+//#define CUSTOM_CALLNO
 //#define DEBUG
 
 #ifdef DEBUG
@@ -25,6 +27,7 @@
 #endif
 
 void dprintf(const char *fmt, ...) {
+  // XXX this doesn't work
 #ifdef DEBUG
     va_list ap;
     va_start(ap, fmt);
@@ -32,10 +35,17 @@ void dprintf(const char *fmt, ...) {
     va_end(ap);
 #endif
 }
-static int foo = 0;
 
+#ifdef CUSTOM_CALLNO
+// Make our syscalls use a special identifier in RAX
+//static char payload[] = "\x50\x48\xC7\xC0\x00\x10\x00\x00\x0F\x05"; // push rax, rax=0x1000, syscall
+static char payload[] = "\x68\x00\x10\x00\x00\x50\x48\xC7\xC0\x00\x10\x00\x00\x0F\x05\xcc"; // push 0x1000, push rax, rax=0x1000, syscall, bkpt - shift is slightly smaller
+#define SHIFT 15
+
+#else
 static char payload[] = "\x0f\x05";
 #define SHIFT 2
+#endif
 
 static csh handle;
 
@@ -129,13 +139,6 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
   bool success;
   std::string this_libname = std::string("");
 
-  // Let's yield the original syscall, then skip it later
-  // This way we can analyze the data before the guest continues
-
-  //__u64* guest_buf = (__u64*)yield_syscall(details, __NR_mmap,
-  //    get_arg(regs, 0), get_arg(regs, 1), get_arg(regs, 2),
-  //    get_arg(regs, 3), get_arg(regs, 4), get_arg(regs, 5));
-
   co_yield *(details->orig_syscall);
   __u64* guest_buf = (__u64*)details->retval;
 
@@ -151,8 +154,14 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
 
   if (!fd_map.contains(details->asid) || !(*fd_map[details->asid]).contains(fd)) {
     // XXX: we're duplicating kernel state here, this will fail is FD is dup'd or inherited
+    // We'll log a warning later if this turns out to be an actual ELF
+    printf("Maybe mmap failure\n");
   }else{
     this_libname = std::string((*fd_map[details->asid])[fd]);
+    if (!lib_details.contains(this_libname)) {
+      lib_details.insert(std::pair(this_libname, new offset_lib_hook_t));
+      printf("Added %s to lib_details\n", this_libname.c_str());
+    }
   }
 
   if (!prot & PROT_EXEC) {
@@ -272,10 +281,8 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
     }
 
     // Sanity checks
-    // Non-zero size?
     if (cur_symtab->st_size == 0) continue;
     if (cur_symtab->st_value < 0x100) continue;
-
 
     char* sym_name;
     map_guest_pointer_status(details, sym_name, strtab + cur_symtab->st_name, &success);
@@ -283,26 +290,6 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
       //printf("Couldn't read symname at %#lx + %#x -> %#lx - skip\n", strtab, cur_symtab->st_name, strtab+cur_symtab->st_name);
       continue;
     }
-
-#if 0
-    // Still hangs, even without hooking forks
-    if (strcmp(sym_name, "__libc_fork") == 0 ||
-        strcmp(sym_name, "__fork") == 0 ||
-        strcmp(sym_name, "fork") == 0
-      ) {
-      printf("IGNORE fork\n");
-      continue;
-    }
-#endif
-
-#if 0
-  foo++;
-  if (foo % 4096 == 16) {
-    printf("Skip %s\n", sym_name);
-    continue;
-  }
-#endif
-
 
     if (ELF64_ST_TYPE(cur_symtab->st_info) != STT_FUNC) {
       //printf("Nofunc: %d\n",ELF64_ST_TYPE(cur_symtab->st_info) );
@@ -319,30 +306,41 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
       // a couple symbols end up with source code. Yuck. Do we actually need to filter these?
       continue;
     }
-
     __u64 sym_addr = (__u64)guest_buf + cur_symtab->st_value;
 
     if (this_libname.length() == 0) {
       printf("WARNING: unable to resolve library name at MMAP\n");
+      goto finish;
     }
 
-    // We found a symbol! First check if we have this library name in lib_details
-    if (!lib_details.contains(this_libname)) {
-      lib_details.insert(std::pair(this_libname, new offset_lib_hook_t));
-    }
-
+    // We found a symbol in this library - if we already know what's there, we can just move on
     if ((*lib_details[this_libname]).contains(cur_symtab->st_value)) {
       // We already know about this offset in the library
-      // XXX: but we still need to safe the load address for this asid!
-
+      // XXX: but we still need to save the library's load address for this asid
       if (!asid_map.contains(details->asid)) {
+        // Add struct to store details for this asid's libraries
         asid_map.insert(std::pair(details->asid, new asid_lib_info_t));
+        dprintf("Create asid map for %x\n", details->asid);
       }
       if (!(*asid_map[details->asid]).contains(this_libname)) {
+        // Update that struct to map this library name to its load address
+        dprintf("Create asid map->library for %x[%s]\n", details->asid, this_libname.c_str());
         (*asid_map[details->asid])[this_libname] = (__u64)guest_buf;
+
+        dprintf("In asid %x we see library %s loaded at %llx, already parsed\n", details->asid, this_libname.c_str(), (__u64)guest_buf);
       }
       continue;
     }
+
+#if 0
+    // For debugging: Skipping symbols should go here
+    if (strcmp(sym_name, "setlocale") == 0) {
+      printf("Found %s at relative %llx\n", sym_name, cur_symtab->st_value);
+    }else{
+      continue;
+    }
+#endif
+
 
     lib_hook_t* symbol_details = new lib_hook_t;
 
@@ -353,24 +351,43 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
     char *target_data;
     map_guest_pointer_status(details, target_data, sym_addr, &success);
     if (!success) {
-      //printf("\tFailed to map symbol %s at %llx\n", sym_name, sym_addr); // Crazy addresses
+      printf("\tFailed to map symbol %s at %llx\n", sym_name, sym_addr); // Crazy addresses
       continue;
     }
 
     // Use capstone to disassemble the first instruction to get its size. Also check if it could change control flow - if so, we should ignore it/warn on use
     cs_insn *insn;
     size_t count;
-    count = cs_disasm(handle, (const uint8_t*)target_data, 20, cur_symtab->st_value, 0, &insn);
-    if (count <= 1) {
-      printf("Impossibly low insn count: %ld\n", count);
-      continue; // XXX bail
-      symbol_details->next_offset = 0; // This indicates a failure
-    }else {
-      symbol_details->next_offset = insn[1].address - insn[0].address;
+    //count = cs_disasm(handle, (const uint8_t*)target_data, (sizeof(payload)-1)*2, cur_symtab->st_value, 0, &insn);
+    count = cs_disasm(handle, (const uint8_t*)target_data, 20, cur_symtab->st_value, 0, &insn); // XXX: size needs to be vary if payload gets bigger
+
+
+    // We need sizeof(payload) bytes for our first payload - make sure we have that many instructions
+    // and those instructions can't (conditionally) jump somewhere else - for now, no calls/rets allowed
+    int cur_offset = 0;
+    for (int i=1; i < count; i++) {
+      cur_offset += insn[i].address - insn[i-1].address;
+      if (cur_offset > (sizeof(payload)-1)) {
+        break;
+      }
+
+      if (cs_insn_group(handle, insn, CS_GRP_CALL)) {
+          printf("Symbol %s has a call\n", sym_name);
+          cur_offset = 0; // Bail
+          break;
+      } else if (cs_insn_group(handle, insn, CS_GRP_RET)) {
+          printf("Symbol %s has a ret\n", sym_name);
+          cur_offset = 0; // Bail
+          break;
+      }
     }
-    // XXX DEBUG
-    //symbol_details->next_offset = 0; // This indicates a failure
-    (*lib_details[this_libname]).insert(std::pair(cur_symtab->st_value, symbol_details));
+
+    if (cur_offset <= (sizeof(payload)-1)) {
+      printf("Symbol %s is just %ld instruction(s) over %d bytes - not enough room for hooks/skip it\n", sym_name, count, cur_offset);
+      continue;
+    }
+
+    symbol_details->next_offset = cur_offset;
 
     if (memcmp(target_data, payload, sizeof(payload)-1) == 0) {
       // Impossible, would already be in our map - unless guest has syscall here already?
@@ -378,7 +395,13 @@ SyscCoroutine start_coopter_mmap(asid_details* details) {
              this_libname.c_str(), symbol_details->name.c_str());
 
       assert(0);
+      //continue; // xxx bail
     }
+
+    // We found a symbol in this library that we didn't know about previously. So we hooked it and saved
+    // the original data
+    (*lib_details[this_libname]).insert(std::pair(cur_symtab->st_value, symbol_details));
+    dprintf("In asid %x we see library %s loaded at %llx\n", details->asid, this_libname.c_str(), (__u64)guest_buf);
 
     memcpy(symbol_details->orig_data, target_data, sizeof(payload)-1);
     memcpy(symbol_details->orig_next_data, target_data+symbol_details->next_offset, sizeof(payload)-1);
@@ -403,16 +426,20 @@ SyscCoroutine layer2_coopt(asid_details* details) {
   // Get guest registers so we can examine the first argument
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
-  unsigned long int pc = regs.rcx-SHIFT;
+  unsigned long int pc = regs.rcx;
 
   // Need to look up original data with libname -> lib_hook_t (TODO use a closure, pass from main)
   lib_hook_t* info = NULL;
   for (const auto &lib_info : *asid_map[details->asid]) {
     if (!lib_details.contains(lib_info.first)) continue;
     for (const auto &sym_info : *lib_details[lib_info.first]) {
-      unsigned long abs_addr = sym_info.first + lib_info.second + sym_info.second->next_offset;
+      unsigned long abs_addr = sym_info.first + lib_info.second + SHIFT;
       // RCX holds old PC
-      if (pc == abs_addr && sym_info.second->is_next_hooked) {
+      if (pc == abs_addr + sym_info.second->next_offset
+#ifndef CUSTOM_CALLNO
+         && sym_info.second->is_next_hooked
+#endif
+         ) {
         info = sym_info.second;
         break;
       }
@@ -429,15 +456,14 @@ SyscCoroutine layer2_coopt(asid_details* details) {
 
   char* target_data;
   bool success;
-  bool skip = true;
 
   // First restore original layer 2
   info->is_next_hooked = false;
   dprintf("\tRestoring original layer2 data at 0x%lx which we're about to run\n", layer2pc);
   map_guest_pointer_status(details, target_data, layer2pc, &success);
   if (success) {
-    //dprintf("Unmodified data\n\t%016lx: ", layer1pc);
-    //HEXDUMP(target_data, 100);
+    dprintf("Unmodified data\n\t%016lx: ", layer1pc);
+    HEXDUMP(target_data, 100);
 
     memcpy(target_data, info->orig_next_data, sizeof(payload)-1);
 
@@ -454,7 +480,6 @@ SyscCoroutine layer2_coopt(asid_details* details) {
   }
 
   // Then, while we're still stopped, reinsert hook at layer 1! XXX this is causing problems
-  if (!skip) {
   map_guest_pointer_status(details, target_data, layer1pc, &success);
   if (success) {
     dprintf("Added layer 1 breakpoint, layer 2 restored:\n\t%016lx: ", layer1pc);
@@ -476,11 +501,18 @@ SyscCoroutine layer2_coopt(asid_details* details) {
   } else {
     printf("Failed to reinsert breakpoint at %lx\n", layer1pc);
   }
-  }
 
   // Jump back to original PC: read out of RCX
   details->custom_return = layer2pc;
   details->use_orig_regs = true; // after our next no-op syscall returns, restore RCX/R11
+
+  // We need to restore RAX
+#ifdef CUSTOM_CALLNO
+  int* stack;
+  map_guest_pointer(details, stack, regs.rsp);
+  details->orig_regs.rax = stack[0]; // Offset 0 is the last thing pushed, so for now we want [1]
+  details->orig_regs.rsp += 16; // XXX 8 or 16?
+#endif
 
   // Necessary so we finish up the syscall and hit the sysret
   yield_syscall(details, __NR_getuid);
@@ -500,10 +532,24 @@ SyscCoroutine layer1_coopt(asid_details* details) {
   char arg0[256] = "";
   char arg1[256] = "";
   map_guest_pointer_status(details, s, regs.rdi, &success);
-  if (success && strlen(s) > 1) snprintf(arg0, 256, " => '%s'", s);
+  if (success && strlen(s) > 1) {
+    snprintf(arg0, 256, " => '%s'", s);
+    for (int i=0; i < strlen(arg0); i++) {
+      if (!isprint(arg0[i])) {
+        arg0[i] = ' ';
+      }
+    }
+  }
 
   map_guest_pointer_status(details, s, regs.rsi, &success);
-  if (success && strlen(s) > 1)  snprintf(arg1, 256, " => '%s'", s);
+  if (success && strlen(s) > 1) {
+    snprintf(arg1, 256, " => '%s'", s);
+    for (int i=0; i < strlen(arg1); i++) {
+      if (!isprint(arg1[i])) {
+        arg1[i] = ' ';
+      }
+    }
+  }
   //printf(">>> Hit hook at %llx: (%s, %s) original RAX is %llx\n", regs.rcx, arg0, arg1, regs.rax);
   printf("%#llx%s, %#llx%s)\n", regs.rdi, arg0, regs.rsi, arg1);
   // End of arg logging
@@ -515,7 +561,15 @@ SyscCoroutine layer1_coopt(asid_details* details) {
     for (const auto &sym_info : *lib_details[lib_info.first]) {
       unsigned long abs_addr = sym_info.first + lib_info.second + SHIFT;
       // RCX holds old PC
-      if (details->orig_regs.rcx == abs_addr && sym_info.second->is_first_hooked) {
+      if (regs.rcx == abs_addr
+#ifndef CUSTOM_CALLNO
+        && sym_info.second->is_first_hooked
+#endif
+        ) {
+        info = sym_info.second;
+        break;
+      }else if (regs.rcx == abs_addr) {
+        printf("Hit but unhooked(?) @ %lx - ignoring\n", abs_addr);
         info = sym_info.second;
         break;
       }
@@ -523,7 +577,7 @@ SyscCoroutine layer1_coopt(asid_details* details) {
   }
 
   if (info == NULL) {
-    printf("Failed to find original data - abort\n");
+    printf("Layer1 for asid %x failed to find original data - abort at PC %llx\n", details->asid, regs.rcx);
     assert(0);
   }
 
@@ -533,28 +587,15 @@ SyscCoroutine layer1_coopt(asid_details* details) {
   //printf("Restoring data %02x%02x to %llx which has %02x%02x\n", info->orig_data[0], info->orig_data[1], regs.rcx-(sizeof(payload)-1), target_data[0], target_data[1]);
   memcpy(target_data, info->orig_data, sizeof(payload)-1);
 
-#if 0
-  printf("Restored layer1 is:\n %016llx", regs.rcx-SHIFT);
-  for (int i=0; i < 10; i++) {
-    printf("%02x ", target_data[i]&0xff);
-  }
-  puts("");
-#endif
-
   details->use_orig_regs = true; // after our next no-op syscall returns, restore RCX/R11
 
   // Jump back to original PC: read out of RCX, decrement by the payload size +1
   details->custom_return = regs.rcx-SHIFT;
 
-  if (info->next_offset == 0) {
-    printf("ERROR: we hit a breakpoint for something we identified as invalid code\n");
-    goto end;
-  }
-
   // Insert breakpoint 2 at this insn's offset and update map info
   dprintf("\tInsert breakpoint2 at %llx (base+%x)\n", regs.rcx-SHIFT + info->next_offset, info->next_offset);
 
-  // Layer 2 should go at PC+offset, so rcx-SHIFT+
+  // Layer 2 should go at PC+offset, so rcx-SHIFT+next_offset
   map_guest_pointer_status(details, target_data, regs.rcx-SHIFT+info->next_offset, &success);
   info->is_first_hooked = false;
   info->is_next_hooked = true;
@@ -564,6 +605,14 @@ SyscCoroutine layer1_coopt(asid_details* details) {
   dprintf("\tRevert to restored layer1 at %lx with layer 2 at %llx\n", details->custom_return, regs.rcx-SHIFT+info->next_offset);
 
 end:
+  // We need to restore RAX
+#ifdef CUSTOM_CALLNO
+  int* stack;
+  map_guest_pointer(details, stack, regs.rsp);
+  //printf("Restore stack L1: %lx, %lx, %lx, %lx\n", stack[0], stack[1], stack[2], stack[3]);
+  details->orig_regs.rax = stack[0];
+  details->orig_regs.rsp += 16; // XXX 8 or 16?
+#endif
 
   // We need this just to sysret from the 'syscall' we've already entered
   yield_syscall(details, __NR_getuid); // Junk syscall - need this at the end, otherwise some of our changes don't take? (not sure which?)
@@ -584,6 +633,7 @@ SyscCoroutine start_coopter_execve(asid_details* details) {
   details->orig_regs.rax = result;
 }
 
+// Not sure if we need this? I think we do?
 SyscCoroutine start_coopter_clone(asid_details* details) {
   co_yield *(details->orig_syscall);
   __u64 child_tgid = details->retval;
@@ -603,15 +653,14 @@ SyscCoroutine ignore_coopter(asid_details* details) {
   __u64 this_pid = yield_syscall(details, __NR_getpid);
   unsigned long pc = regs.rcx-2; // sizeof(syscall insn)
 
+  //printf("Asid %x does syscall %d at %lx\n", details->asid, callno, pc);
+
+  // Do we need to identify children to make sure they get hooked? probably??
   for (auto it = pending_clones.begin(); it != pending_clones.end(); it++) {
     if (asid_map.contains(it->first)) {
       if (it->second == this_pid) {
-        printf("SPECIAL CHILD FOUND asid %x has child %x (with pid %lld)\n", it->first, details->asid, this_pid);
-        // We're in the first syscall here
-        // it's probably (definitely?) not a fake one we added, so we can let it run without issue
-
+        printf("[HyDE] Asid %x has child %x (with pid %lld)\n", it->first, details->asid, this_pid);
         asid_map.insert(std::pair(details->asid, asid_map[it->first]));
-
         pending_clones.erase(it);
         break;
       }
@@ -624,11 +673,14 @@ SyscCoroutine ignore_coopter(asid_details* details) {
   details->orig_regs.rax = result;
 }
 
+#if 0
+// Parsing these is pretty complicated. See https://github.com/dkogan/ltrace/blob/82c66409c7a93ca6ad2e4563ef030dfb7e6df4d4/read_config_file.c
 void parse_config_file(std::string s) {
   std::ifstream input(s.c_str());
   for (std::string line; getline(input, line);) {
     if (line.length() == 0) continue;
-    if (line.starts_with("import") || line.starts_with("#") || line.starts_with("typedef")) {
+    if (line.starts_with("import") || line.starts_with("#") ||
+      line.starts_with("typedef") || line.starts_with(";")) {
       continue;
     }
 
@@ -637,11 +689,41 @@ void parse_config_file(std::string s) {
     char* args = strstr(name, "(");
     args[0] = 0;
     args++;
-    printf("debug: %s\n", args);
-    strstr(args, ");")[0] = 0;
+
+    if (strstr(args, ");") != NULL)
+      strstr(args, ");")[0] = 0;
+
+
+    while(strstr(args, ",") != NULL) {
+      char *nargs = strstr(args, ",");
+      nargs[0] = 0;
+
+      // If we see a ( before the first arg, it's some sort of decorator, e.g., array(foo), array(hex(foo))
+      if (strstr(args, "(") != NULL) {
+        int paren_c = 0;
+        while (parent_c++) {
+          char* next_open = strstr(args+1, "(");
+          char* next_close = strstr(args+1, ")");
+          if (next_open == NULL) break; // Easy case
+          if (next_open < next_close) {
+            paren_c++;
+            args = next_open;
+          }else if (paren_c > 1) {
+            args = next_close;
+            paren_c--;
+          } else {
+            break;
+          }
+        }
+      }
+
+      printf("Arg: %s\n", args);
+      args = nargs;
+    }
     printf("Function %s with args: %s\n", name, args);
   }
 }
+#endif
 
 static void _con() __attribute__((constructor));
 void _con() {
@@ -649,8 +731,8 @@ void _con() {
   if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) assert(0);
   cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
 
-  // Read host /usr/share/ltrace/*.conf for some signatures
 #if 0
+  // Read host /usr/share/ltrace/*.conf for some signatures
   std::string path = "/usr/local/share/ltrace/";
   for (const auto & entry : std::filesystem::directory_iterator(path)) {
     std::string s = entry.path();
@@ -663,13 +745,46 @@ void _con() {
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno, long unsigned int pc, unsigned int asid) {
   //printf("Syscall %d with bug. PC=%x. Asid %lx\n", callno, pc, asid);
+
+#ifdef CUSTOM_CALLNO
+  if (callno == 0x1000) {
+    //printf("Triggered at %lx in asid %x\n", pc, asid);
+    // TODO use stack to look up library info
+    if (asid_map.contains(asid)) {
+      // For each library we know about, we need to check all the hooked PCs (note we use PC, not callno)
+      for (const auto &lib_info : *asid_map[asid]) {
+        //printf("Library %s loaded at %llx in %x\n", lib_info.first.c_str(), lib_info.second, asid);
+
+        if (!lib_details.contains(lib_info.first)) continue;
+
+        for (const auto &sym_info : *lib_details[lib_info.first]) {
+          unsigned long abs_addr = sym_info.first + lib_info.second + SHIFT;
+          //printf("Check if %lx is a match for symbol %s\n", pc, sym_info.second->name.c_str());
+
+          char *libname = lib_info.first.c_str();
+          if (strrchr(libname, '/') != NULL) {
+            libname = strrchr(libname, '/');
+          }
+
+          if (pc == abs_addr) {
+            printf(">> hltrace asid %x pc %lx %8s:%s(", asid, pc, libname, sym_info.second->name.c_str());
+            return &layer1_coopt;
+          } else if (pc == abs_addr+sym_info.second->next_offset) {
+            printf("<< hltrace asid %x pc %lx %8s:%s\n", asid, pc, libname, sym_info.second->name.c_str());
+            return &layer2_coopt;
+          }
+        }
+      }
+    }
+    printf("Uh oh, missing asid_map/lib info for one of our calls\n");
+  }
+#else
   if (asid_map.contains(asid)) {
     // For each library we know about, we need to check all the hooked PCs (note we use PC, not callno)
     for (const auto &lib_info : *asid_map[asid]) {
       //printf("Library %s loaded at %llx in %x\n", lib_info.first.c_str(), lib_info.second, asid);
 
       if (!lib_details.contains(lib_info.first)) continue;
-
       for (const auto &sym_info : *lib_details[lib_info.first]) {
         unsigned long abs_addr = sym_info.first + lib_info.second + SHIFT;
         //printf("Check if %lx is a match for symbol %s\n", pc, sym_info.second->name.c_str());
@@ -677,24 +792,41 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno, long unsigned 
         if (pc == abs_addr) {
           if ( sym_info.second->is_first_hooked) {
             //printf("\tHit L1: Library %s, symbol %s at offset %x, absolute %llx\n", lib_info.first.c_str(), sym_info.second->name.c_str(), sym_info.first, sym_info.first+lib_info.second);
-            printf(">> hltrace %x %30s:%s(", asid, lib_info.first.c_str(), sym_info.second->name.c_str());
+
+            char *libname = strdup(lib_info.first.c_str());
+            if (strrchr(libname, '/') != NULL) {
+              libname = strrchr(libname, '/')+1;
+            }
+            printf(">> hltrace asid %x pc %lx %8s+%08x -> %s(", asid, pc, libname,
+                   sym_info.first, sym_info.second->name.c_str());
             return &layer1_coopt;
-          } else {
-            printf("Warning: possibly missed hook in asid %x at %lx\n", asid, pc);
+          //} else {
+          //  printf("Warning: possibly missed hook in asid %x at %lx\n", asid, pc);
           }
-        } else if (pc == abs_addr+sym_info.second->next_offset && sym_info.second->is_next_hooked) {
-          return &layer2_coopt;
+        } else if (pc == abs_addr+sym_info.second->next_offset) {
+          if (sym_info.second->is_next_hooked) {
+            //printf("<< hltrace asid %x pc %lx %30s:%s\n", asid, pc, lib_info.first.c_str(), sym_info.second->name.c_str());
+            return &layer2_coopt;
+          //} else {
+          //  printf("Warning: possibly missed layer 2 hook in asid %x at %lx would be %s:%s\n", asid, pc, lib_info.first.c_str(), sym_info.second->name.c_str());
+          }
         }
       }
     }
+  //} else if (callno > 313) {
+  //  printf("YIKES unhandled injected call? callno=%ld, pc=%lx, asid=%x\n", callno, pc, asid);
   }
+#endif
 
   if (callno == __NR_open || callno == __NR_openat) {
     return &start_coopter_open;
   } else if (callno == __NR_mmap) {
     return &start_coopter_mmap;
-  } else if (callno == __NR_clone) {
-    return &start_coopter_clone;
+  //} else if (callno == __NR_clone) {
+  //  printf("UH UH there's a clone - handle it!\n");
+  //  return &start_coopter_clone; // Unnecessary?
+  //} else if (callno == __NR_fork) {
+  //  printf("UH UH there's a fork - TODO\n");
   } else if (callno == __NR_execve) {
     return &start_coopter_execve;
   }
