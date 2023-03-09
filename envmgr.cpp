@@ -6,6 +6,7 @@
 #include <vector>
 #include "hyde.h"
 
+
 SyscCoroutine start_coopter(asid_details* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
@@ -18,19 +19,25 @@ SyscCoroutine start_coopter(asid_details* details) {
   std::vector<std::string> arg_list;
 
   // Create guest and host envp references and use to read arguments out
-  __u64 *host_envp; // Can dereference on host
-  __u64 *guest_envp = (__u64*)get_arg(regs, 2); // Can't dereference on host, just use for addrs
+  uint64_t host_envp; // Can dereference on host
+  uint64_t guest_envp = (uint64_t)get_arg(regs, 2); // Can't dereference on host, just use for addrs
   for (int i=0; i < 255; i++) {
-    map_guest_pointer(details, host_envp, &guest_envp[i]);
-    if (*host_envp == 0) break;
-    char* env_val;
-    map_guest_pointer(details, env_val,*host_envp);
+    //map_guest_pointer(details, host_envp, &guest_envp[i]);
+    //printf("On iteration %d, trying to read guest memory at %lx\n", i, guest_envp+i);
+    yield_from(new_memread, details, guest_envp+(i*sizeof(host_envp)), &host_envp, sizeof(host_envp));
+
+    if (host_envp == 0) break;
+    char env_val[128];
+    //map_guest_pointer(details, env_val,*host_envp);
+    //printf("Following guest memory to read from %lx in guest...\n", host_envp);
+    yield_from(new_memread, details, host_envp, &env_val, sizeof(env_val));
+    //printf("Got env var: %s\n", env_val);
 
     if (strncmp(inject.c_str(), env_val, inject.find('=')+1) == 0) {
       // Existing env var duplicates the one we're injecting - don't save it
       continue;
     }
-    guest_arg_ptrs.push_back(*host_envp);
+    guest_arg_ptrs.push_back(host_envp);
     arg_list.push_back(std::string(env_val));
   }
 
@@ -64,6 +71,7 @@ SyscCoroutine start_coopter(asid_details* details) {
   guest_buf += inject.length();
 
   // Now write each of the original env pointers into the buffer
+  // TODO: we have new_memread, now we need just a new_memmap, and/or a new_memwrite
   int i=0;
   char** newenvp;
   for (auto &env_item : guest_arg_ptrs) {
@@ -83,7 +91,8 @@ SyscCoroutine start_coopter(asid_details* details) {
   co_yield *(details->orig_syscall); // noreturn
 }
 
-create_coopt_t* should_coopt(void*cpu, long unsigned int callno) {
+create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
+                             long unsigned int pc, unsigned int asid) {
   // We inject syscalls starting at every execve
   if (callno == __NR_execve)
     return &start_coopter;
