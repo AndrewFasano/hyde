@@ -1,4 +1,9 @@
-CFLAGS=-shared -fcoroutines -g -I../qemu/accel/kvm/ -std=c++20 -fPIC 
+# CFLAGS needs -fcoroutines with gcc. But the internet claims
+# gcc is terrible with coroutines. Not sure if I believe that, but
+# I'm getting internal compiler errors now so let's give clang a shot!
+
+CC=clang++-15
+CFLAGS=-shared -g -I../qemu/accel/kvm/ -std=c++20 -fPIC
 LDFLAGS=
 
 
