@@ -6,7 +6,6 @@
 #include <vector>
 #include "hyde.h"
 
-
 SyscCoro start_coopter(asid_details* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
@@ -15,6 +14,7 @@ SyscCoro start_coopter(asid_details* details) {
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
 
+  int rv = -1;
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
   ga* injected_arg;
@@ -22,7 +22,6 @@ SyscCoro start_coopter(asid_details* details) {
 
   // Create guest and host envp references and use to read arguments out
   ga* guest_envp = (ga*)get_arg(regs, 2); // Guest pointer
-
   for (int i=0; i < 255; i++) {
     uint64_t host_envp;
     char env_val[128];
@@ -60,9 +59,6 @@ SyscCoro start_coopter(asid_details* details) {
   // injected variable. Finally, we need to change the `envp` that will be
   // used by the original execve to point to the start of our pointer list
 
-  int gpid = (int)yield_syscall(details, __NR_getpid, 0);
-  printf("PID is %d\n", gpid);
-
   // test with:    strace -f systemctl start snapd.service
   // better test: /usr/lib/snapd/snapd
   ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap,
@@ -74,7 +70,7 @@ SyscCoro start_coopter(asid_details* details) {
     co_return -1;
   }
 
-  printf("[ENVMGR] Allocated guest buffer at gva %llx\n", (__u64)guest_buf);
+  //printf("[ENVMGR] Allocated guest buffer at gva %llx\n", (__u64)guest_buf);
 
   // Get a host pointer that we can use to access guest_buf
   char* host_buf;
@@ -117,16 +113,19 @@ SyscCoro start_coopter(asid_details* details) {
   *newenvp = (char*)0;
 
 
-  // Finally, we run the original (execve) syscall, but with a different arg2 pointing to our buffer
-  details->orig_syscall->args[2] = (__u64)guest_buf;
-  co_yield *(details->orig_syscall); // noreturn
+  //printf("[ENVMGR] Deallocate buffer at %llx for success\n", (__u64)guest_buf);
+  yield_syscall(details, __NR_munmap, guest_buf, 1024);
 
-  co_return 0; // No error
+  // Finally, update the original (execve) syscall so arg2 points to our buffer
+  details->orig_syscall->args[2] = (__u64)guest_buf;
+
+  rv = 0; // No error
 
 cleanup_buf: // We have failed after allocating memory, clean it up
+  //printf("[ENVMGR] Deallocate buffer at %llx for error\n", (__u64)guest_buf);
   yield_syscall(details, __NR_munmap, guest_buf, 1024);
   co_yield *(details->orig_syscall); // noreturn
-  co_return -1; // Error
+  co_return rv;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
