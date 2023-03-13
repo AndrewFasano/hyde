@@ -112,10 +112,6 @@ SyscCoro start_coopter(asid_details* details) {
   }
   *newenvp = (char*)0;
 
-
-  //printf("[ENVMGR] Deallocate buffer at %llx for success\n", (__u64)guest_buf);
-  yield_syscall(details, __NR_munmap, guest_buf, 1024);
-
   // Finally, update the original (execve) syscall so arg2 points to our buffer
   details->orig_syscall->args[2] = (__u64)guest_buf;
 
