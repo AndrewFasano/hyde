@@ -5,6 +5,7 @@
 #include <sys/wait.h> // for waitid
 #include <errno.h> // EINTR
 #include <sys/ptrace.h> // PTRACE_
+#include <sys/user.h> // GETREGS layout for x86_64
 #include <string.h>
 #include "hyde.h"
 
@@ -78,7 +79,17 @@ SyscCoroutine start_coopter(asid_details* details) {
     int ctr = 0;
     while (true) {
 
-      printf("syscall %d\n", ctr++);
+      ctr++;
+      if (ctr % 2 == 1) { // Log on return, callno + retval
+        // First get registers
+        long int greg_rv = yield_syscall(details, __NR_ptrace, PTRACE_GETREGS, child, 0, (long unsigned)guest_buf);
+        //printf("Greg: %ld\n", greg_rv);
+
+        user_regs_struct *gregs;
+        map_guest_pointer(details, gregs, guest_buf);
+        printf("%2d syscall: %lld  => %llx\n", ctr/2, gregs->orig_rax, gregs->rax); // Maybe we want orig_rax?
+      }
+
       yield_syscall(details, __NR_ptrace, PTRACE_SYSCALL, child, 1, 0);
 
       // Syscall('waitid', [consts.P_PID, child_pid, outbuf, consts.WSTOPPED|consts.WEXITED, 0], signed=True)
@@ -101,7 +112,6 @@ SyscCoroutine start_coopter(asid_details* details) {
       }
       
       continue;
-
       // sleep no-op
       timespec* req_h;
       map_guest_pointer(details, req_h, guest_buf);
@@ -122,10 +132,11 @@ end:
 }
 
 SyscCoroutine possible_child(asid_details* details) {
-  unsigned long pid = yield_syscall(details, __NR_getpid);
+  // For every process that could be a child, check it's PPID and see if it matches the pending parent
   unsigned long ppid = yield_syscall(details, __NR_getppid);
 
   if (parent_pid == ppid) {
+    unsigned long pid = yield_syscall(details, __NR_getpid);
     printf("\n[CHILD] Found child with pid %ld, asid %x at PC %llx\n", pid, details->asid, details->orig_regs.rcx);
     pending_fork = false;
     parent_pid = -1;
@@ -137,12 +148,15 @@ SyscCoroutine possible_child(asid_details* details) {
     co_yield pending_sc;
     co_return;
   }
-  co_yield *(details->orig_syscall); // callno=59
+  co_yield *(details->orig_syscall);
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno, long unsigned int pc, unsigned int asid) {
+create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
+                             long unsigned int pc, unsigned int asid) {
   if (callno == __NR_execve) {
     return &start_coopter;
+    // } else if (callno == __NR_ptrace) {
+    // Hmm, we'll see our own injected ptrace syscalls here
   } else if (pending_fork) {
     return &possible_child;
   }
