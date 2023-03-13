@@ -27,18 +27,21 @@ SyscCoro start_coopter(asid_details* details) {
     uint64_t host_envp;
     char env_val[128];
     // Read out the guest pointer to the next env var
+    //printf("Env mgr A loop %d\n", i);
     if (yield_from(ga_memcpy, details, &host_envp, &guest_envp[i], sizeof(host_envp)) == -1) {
-      printf("Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
+      printf("[ENVMGR] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
       co_return -1;
     }
     if (host_envp == 0) break;
 
     // Read out the value of the env var
+    //printf("Env mgr B loop %d\n", i);
     if (yield_from(ga_memcpy, details, &env_val, (ga*)host_envp, sizeof(env_val)) == -1) {
-      printf("Error reading envp[%d] at gva %lx, not checking for duplicate name\n", i, (uint64_t)host_envp);
+      printf("[ENVMGR] Error reading envp[%d] at gva %lx, not checking for duplicate name\n", i, (uint64_t)host_envp);
       strcpy(env_val, "[MEM ERROR]");
       goto save_ptrs;
     }
+
 
     if (strncmp(inject.c_str(), env_val, inject.find('=')+1) == 0) {
       // Skip past any env vars that have the same key as our injection
@@ -57,6 +60,9 @@ SyscCoro start_coopter(asid_details* details) {
   // injected variable. Finally, we need to change the `envp` that will be
   // used by the original execve to point to the start of our pointer list
 
+  int gpid = (int)yield_syscall(details, __NR_getpid, 0);
+  printf("PID is %d\n", gpid);
+
   // test with:    strace -f systemctl start snapd.service
   // better test: /usr/lib/snapd/snapd
   ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap,
@@ -64,14 +70,16 @@ SyscCoro start_coopter(asid_details* details) {
       /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
 
   if ((int64_t)guest_buf <= 0 && (int64_t)guest_buf > -0x1000) {
-    printf("[HYDE] ERROR allocating scratch buffer got: %lu\n", (int64_t) guest_buf);
+    printf("[ENVMGR] ERROR allocating scratch buffer got: %lu\n", (int64_t) guest_buf);
     co_return -1;
   }
+
+  printf("[ENVMGR] Allocated guest buffer at gva %llx\n", (__u64)guest_buf);
 
   // Get a host pointer that we can use to access guest_buf
   char* host_buf;
   if(yield_from(ga_map, details, guest_buf, (void**)&host_buf, 1024) == -1) {
-    printf("Error mapping allocatd guest buffer\n");
+    printf("[ENVMGR] Error mapping allocated guest buffer from gva %lx\n", (uint64_t)guest_buf );
     goto cleanup_buf;
   }
 
@@ -87,7 +95,7 @@ SyscCoro start_coopter(asid_details* details) {
   char** newenvp;
   for (auto &env_item : guest_arg_ptrs) {
     if (yield_from(ga_map, details, &guest_buf[i], (void**)&newenvp, 128) == -1) {
-      printf("Error mapping pointer for value %d\n", i);
+      printf("[ENVMGR] Error mapping pointer for value %d\n", i);
       goto cleanup_buf;
     }
     *newenvp = (char*)env_item;
@@ -97,13 +105,13 @@ SyscCoro start_coopter(asid_details* details) {
   // Add our new variable, then a null terminator
   //map_guest_pointer(details, newenvp, &guest_buf[i]);
   if (yield_from(ga_map, details, &guest_buf[i], (void**)&newenvp, sizeof(injected_arg)) == -1) {
-    printf("Error mapping pointer for injected variable\n");
+    printf("[ENVMGR] Error mapping pointer for injected variable\n");
     goto cleanup_buf;
   }
   *newenvp = (char*)injected_arg;
   //map_guest_pointer(details, newenvp,&guest_buf[i+1]);
   if (yield_from(ga_map, details, &guest_buf[i+1], (void**)&newenvp, 1) == -1) {
-    printf("Error mapping pointer for null terminator\n");
+    printf("[ENVMGR] Error mapping pointer for null terminator\n");
     goto cleanup_buf;
   }
   *newenvp = (char*)0;
@@ -117,7 +125,8 @@ SyscCoro start_coopter(asid_details* details) {
 
 cleanup_buf: // We have failed after allocating memory, clean it up
   yield_syscall(details, __NR_munmap, guest_buf, 1024);
-  co_return -1;
+  co_yield *(details->orig_syscall); // noreturn
+  co_return -1; // Error
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
