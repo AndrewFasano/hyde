@@ -36,7 +36,8 @@ SyscCoro start_coopter(asid_details* details) {
     char *new_host_buf;
     struct stat statbuf;
 
-    if (done) co_return 0;
+
+    if (done) goto out;
 
     if (yield_syscall(details, __NR_geteuid)) {
         rv = -1;
@@ -51,7 +52,7 @@ SyscCoro start_coopter(asid_details* details) {
     }
     // Now running with the lock
     if (done) {
-        co_return 0;
+        goto out;
     }
 
     // Allocate guest memory for reading/writing shadow file
