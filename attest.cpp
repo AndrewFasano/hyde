@@ -10,61 +10,77 @@
 #include "hyde.h"
 #include <boost/uuid/detail/sha1.hpp> // apt-get install libboost-all-dev
 
-SyscCoroutine start_coopter(asid_details* details) {
+#define BUF_SZ 1024
+SyscCoro start_coopter(asid_details* details) {
   // Before we exec a binary, read it off disk and calculate its hash
   // OPTIONAL: read it into a MEMFD, hash that, then execfd it
 
   // Get guest registers so we can examine the first argument
+  int rv = 0;
+  std::string buffer;
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
+  int guest_fd;
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
-
-  // Create guest and host envp references and use to read arguments out
-  char *host_pathname; // Can dereference on host
-  char *guest_pathname = (char*)get_arg(regs, 0); // Can't dereference on host, just use for addrs
-  map_guest_pointer(details, host_pathname, guest_pathname);
-
-  // Allocate scratch buffer
-  __u64* guest_buf = (__u64*)yield_syscall(details, __NR_mmap,
-      /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
-      /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
-
-  //printf("Guest buffer is at %p\n", guest_buf);
-
-
-  // Open target binary for reading
-  int guest_fd = yield_syscall(details, __NR_open, (long unsigned int)guest_pathname, O_RDONLY);
-  //printf("Guest FD is %d\n", guest_fd);
-
-  assert(guest_fd >= 0);
-
-  __u64 bytes_read = -1;
-  #define BUF_SZ 1024
-  char *host_data = (char*)malloc(BUF_SZ);
-
   boost::uuids::detail::sha1 sha1;
-  
-  while (bytes_read != 0)  {
-    bytes_read = yield_syscall(details, __NR_read, guest_fd, (__u64)guest_buf, BUF_SZ);
-    map_guest_pointer(details, host_data, guest_buf);
-    sha1.process_bytes(host_data, bytes_read);
-  }
-
   unsigned hash[5] = {0};
-  sha1.get_digest(hash);
-  // Back to string
   char buf[41] = {0};
-  for (int i = 0; i < 5; i++) {
-    std::sprintf(buf + (i << 3), "%08x", hash[i]);
-  }
-  std::string myhash = std::string(buf);
-  printf("[HyDE] About to execute %s with sha1sum of %s\n", host_pathname, myhash.c_str());
+  char path[256];
 
-  // Finally, we run the original (execve) syscall, but with a different arg2 pointing to our buffer
-  //details->orig_syscall->args[2] = (__u64)guest_buf;
-  co_yield *(details->orig_syscall); // noreturn
+  ga *path_ptr = (ga*)get_arg(regs, 0); 
+  if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
+      printf("[Attest] Unable to read filename at %lx\n", (uint64_t)path_ptr);
+      rv = -1;
+  } else {
+    ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap,
+        /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
+        /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
+
+    // Open target binary for reading
+    guest_fd = (int)yield_syscall(details, __NR_open, path_ptr, O_RDONLY);
+    if (guest_fd < 0) {
+      printf("[Attest] Could not open %s", path);
+      rv = -1;
+    } else {
+
+      // Read file until we hit EOF, update sha1sum as we go
+      bool fail = false;
+      while (true) {
+        char host_data[BUF_SZ];
+        int bytes_read = yield_syscall(details, __NR_read, guest_fd, (__u64)guest_buf, BUF_SZ);
+        if (bytes_read == 0) break;
+
+        if (yield_from(ga_memcpy, details, host_data, guest_buf, sizeof(struct stat)) == -1) {
+          printf("[Attest] Unable to read file data at %lx\n", (uint64_t)guest_buf);
+          fail = true;
+          break;
+        }
+
+        printf("Update sha1 sum with %ld bytes\n", bytes_read);
+        sha1.process_bytes(host_data, bytes_read);
+      }
+
+      if (!fail) {
+        sha1.get_digest(hash);
+        // Back to string
+        for (int i = 0; i < 5; i++) {
+          std::sprintf(buf + (i << 3), "%08x", hash[i]);
+        }
+
+        std::string myhash = std::string(buf);
+        printf("[HyDE] About to execute %s with sha1sum of %s\n", path, myhash.c_str());
+      }
+
+      yield_syscall(details, __NR_close, guest_fd);
+    }
+
+    yield_syscall(details, __NR_munmap, guest_buf, BUF_SZ);
+  }
+
+  co_yield *(details->orig_syscall);
+  co_return rv;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
