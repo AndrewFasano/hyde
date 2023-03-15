@@ -21,102 +21,89 @@
 static std::mutex running_in_root_proc;
 static bool done = false;
 
+
+SyscCoro read_file(asid_details *details, ga* guest_buf, char* pathname, char**contents, int scratch_size) {
+    int read_rv = -1;
+    *contents = NULL;
+
+    if (yield_from(ga_memwrite, details, guest_buf, (void*)pathname, strlen(pathname)+1) == -1) {
+        printf("[PS] Error: could not to write path %s into to guest memory\n", pathname);
+        co_return -1;
+    }
+
+    char* data = (char*)malloc(scratch_size);
+    data[0] = '\0';
+
+    // Open file
+    int fd = yield_syscall(details, __NR_open, guest_buf, O_RDONLY, 0);
+    if (fd < 0) {
+        printf("[PS] Error: could not open %s\n", pathname);
+        snprintf(data, scratch_size, "[open error]");
+    } else {
+       read_rv = yield_syscall(details, __NR_read, fd, guest_buf, scratch_size);
+
+        if (read_rv < 0) {
+            snprintf(data, scratch_size, "[read error]");
+        } else if (read_rv == 0) {
+            snprintf(data, scratch_size, "[empty]");
+        } else {
+            if (yield_from(ga_memcpy, details, data, guest_buf, read_rv) == -1) {
+                printf("[PS] Error: could not read data from guest memory for file %s\n", pathname);
+                snprintf(data, scratch_size, "[virt mem read error]");
+            }
+
+            // Drop null terminators up to the last one (since we have null-seperated args)
+            for (int i = 0; i < read_rv-1; i++)
+                if (data[i] == '\0')
+                    data[i] = ' ';
+        }
+        // Close fd
+        yield_syscall(details, __NR_close, fd);
+    }
+
+    *contents = data;
+
+    co_return read_rv;
+
+}
+
 #define BUF_SIZE 1024
 
 SyscCoro print_procinfo(asid_details *details, std::vector<int> *pids) {
-
     ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap, 0, BUF_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
     for (int pid : *pids) {
         char fd_path[128];
-        char cmdline[BUF_SIZE];
-        char comm[BUF_SIZE];
+        char* cmdline;
+        char* comm;
 
-        // Populate fd_path with /proc/<pid>/cmdline
+        // Read /proc/<pid>/cmdline and /proc/<pid>/comm, drop newlines in output
         snprintf(fd_path, sizeof(fd_path), "/proc/%d/cmdline", pid);
-        if (yield_from(ga_memwrite, details, guest_buf, (void*)fd_path, strlen(fd_path)+1) == -1) {
-            printf("[PS] Error: could not to write cmdline path into to guest memory for pid %d\n", pid);
-            continue;
-        }
+        int cmdline_read = yield_from(read_file, details, guest_buf, fd_path, &cmdline, BUF_SIZE);
+        if (cmdline_read > 0 && cmdline != NULL) 
+            for (int i = 0; i < cmdline_read; i++)
+                if (cmdline[i] == '\n') cmdline[i] = ' ';
 
-        // Read cmdline and comm into guest_buf
-        //int fd = yield_syscall(details, __NR_openat, AT_FDCWD, guest_buf, O_RDONLY);
-        int fd = yield_syscall(details, __NR_open, guest_buf, O_RDONLY, 0);
-        if (fd < 0) {
-            printf("[PS] Error: could not open cmdline file for pid %d - open(%s, %d) => %d;\n", pid, fd_path, O_RDONLY, fd);
-            strcpy(cmdline, "[open error]");
-        } else {
-            // Assuming cmdline is less than BUF_SIZE so we only need one read
-            int read_rv = yield_syscall(details, __NR_read, fd, guest_buf, BUF_SIZE);
-
-            if (read_rv < 0) {
-                strcpy(cmdline, "[read error]" );
-            } else if (read_rv == 0) {
-                strcpy(cmdline, "[empty]" );
-            } else {
-                if (yield_from(ga_memcpy, details, cmdline, guest_buf, read_rv) == -1) {
-                    printf("[PS] Error: could not read cmdline from guest memory for pid %d\n", pid);
-                    strcpy(cmdline, "???");
-                }
-
-                // Drop null terminators up to the last one (since we have null-seperated args)
-                for (int i = 0; i < read_rv-1; i++)
-                    if (cmdline[i] == '\0')
-                        cmdline[i] = ' ';
-            }
-            // Close fd
-            yield_syscall(details, __NR_close, fd);
-        }
-
-        // Now read comm into guest_buf, just like before
         snprintf(fd_path, sizeof(fd_path), "/proc/%d/comm", pid);
-        if (yield_from(ga_memwrite, details, guest_buf, (void*)fd_path, strlen(fd_path)+1) == -1) {
-            printf("[PS] Error: could not to write comm path into to guest memory for pid %d\n", pid);
-            continue;
-        }
-
-        fd = yield_syscall(details, __NR_open, guest_buf, O_RDONLY, 0);
-        if (fd < 0) {
-            printf("[PS] Error: could not open comm file for pid %d - open(%s, %d) => %d;\n", pid, fd_path, O_RDONLY, fd);
-            strcpy(comm, "[open error]");
-        } else {
-            int read_rv = yield_syscall(details, __NR_read, fd, guest_buf, BUF_SIZE);
-
-            if (read_rv < 0) {
-                strcpy(comm, "[read error]" );
-            } else if (read_rv == 0) {
-                strcpy(comm, "[empty]" );
-            } else {
-                // Populate comm
-                if (yield_from(ga_memcpy, details, comm, guest_buf, read_rv) == -1) {
-                    printf("[PS] Error: could not read comm from guest memory for pid %d\n", pid);
-                    strcpy(comm, "???");
-                }else {
-                    comm[read_rv-1] = '\0';
-                }
-            }
-            yield_syscall(details, __NR_close, fd);
-        }
-
+        int comm_read = yield_from(read_file, details, guest_buf, fd_path, &comm, BUF_SIZE);
+        if (comm_read && comm != NULL)
+            for (int i = 0; i < comm_read; i++)
+                if (comm[i] == '\n') comm[i] = ' ';
 
         printf("%d: %s  %s\n", pid, cmdline, comm);
+        if (cmdline) free(cmdline);
+        if (comm) free(comm);
 
     }
 
-done:
     yield_syscall(details, __NR_munmap, guest_buf, BUF_SIZE);
     co_return 0;
-
-error:
-    yield_syscall(details, __NR_munmap, guest_buf, BUF_SIZE);
-    co_return -1;
 
 }
 
 SyscCoro ls_dir(asid_details *details, char* dirname, std::vector<int> *pids) {
     int fd;
     long nread;
-    //char buf[BUF_SIZE];
     char d_type;
 
     ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap, 0, BUF_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -185,8 +172,7 @@ error:
 
 SyscCoro start_coopter(asid_details *details)
 {
-    // Grab a mutex in a root process and run ls_dir
-
+    // Grab a mutex in a root process, get PIDs from /proc , then print info for each PID
     int rv = 0;
     char target_dir[] = {"/proc"};
 
