@@ -71,3 +71,5 @@ And more!
 | EnvMgr       | Execution addition | Add environment variable | Yes | 91 | works on ubuntu 18.04
 | SecretFile   | Pseudofile addition | Conditionally allow reads of a (host-managed) pseudofile | Yes |  139 | works on ubuntu 18.04
 | PS           | Introspection | List currently running processes | Yes |  144 | works on ubuntu 18.04
+| Attest       | Execution filter | Checksum binaries before they're allowed to run | Yes |  105 | works on ubuntu 18.04
+| LaunchSSH    | Program launcher | WIP | No | - | -
