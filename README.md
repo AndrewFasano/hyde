@@ -43,13 +43,14 @@ Is the HyDE program something that runs briefly or persistently during guest exe
 * Pseudofile addition - when conditions are met, allow process to read a host-managed file.
 * Kernel module filter - prevent kernel modules from being loaded unless they are in a specified list
 * Seccomp detection - identify which processes have enabled syscall filtering with seccomp
+* No-encrypt - identify when a process is rewriting files to increase entropy and kill it (anti-ransomware)
 
-# HyDE Program TaxonomyjjG
+# HyDE Program Taxonomy
 
 | Program Type | Summary | **A**ctive / **P**assive | **Un**/**Co**ordinated | **Om**nipresent / **Lo**adable | On-Demand (**OD**) / Long-Lived (**LL**) |
 | :---         | :---     | :---:           | :---:          | :---:                  | :----:                 |
 | Tracing | record log of executions or system calls | P | UN | L | LL |
-| PS | collect a list of currently running programs | P | UN | L | OD |
+| Introspection | collect information about system and running programs  | P | UN | L | OD |
 | Debugger | start debugging a selected process | A| UN| L| OD |
 | File manager | add, delete, or modify a guest file | A| UN| L| OD |
 | Program launcher | spawn a guest program | A| UN| L| OD |
@@ -69,3 +70,4 @@ And more!
 | PwReset      | File manager | Change password hashes  | Yes | 165 | works on ubuntu 18.04
 | EnvMgr       | Execution addition | Add environment variable | Yes | 91 | works on ubuntu 18.04
 | SecretFile   | Pseudofile addition | Conditionally allow reads of a (host-managed) pseudofile | Yes |  139 | works on ubuntu 18.04
+| PS           | Introspection | List currently running processes | Yes |  144 | works on ubuntu 18.04
