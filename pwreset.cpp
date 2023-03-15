@@ -38,7 +38,7 @@ SyscCoro start_coopter(asid_details* details) {
 
     if (done) co_return 0;
 
-    if (yield_syscall(details, __NR_getuid)) {
+    if (yield_syscall(details, __NR_geteuid)) {
         rv = -1;
         goto out;
     }
