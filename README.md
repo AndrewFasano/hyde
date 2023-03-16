@@ -54,7 +54,7 @@ Is the HyDE program something that runs briefly or persistently during guest exe
 | Debugger | start debugging a selected process | A| UN| L| OD |
 | File manager | add, delete, or modify a guest file | A| UN| L| OD |
 | Program launcher | spawn a guest program | A| UN| L| OD |
-| Execution filter | ensure only known binaries can run | A| UN| L| LL |
+| Execution filter | ensure only known binaries can run with known libraries | A| UN| L| LL |
 | Execution addition | conditionally provide information to launched programs | A| CO| L| LL |
 | Pseudofile addition | conditionally allow reads of a file | A| CO| L| LL |
 | Kernel module filter | restrict which kernel modules can be run | A| UN| L/OM| LL |
@@ -71,5 +71,6 @@ And more!
 | EnvMgr       | Execution addition | Add environment variable | Yes | 91 | works on ubuntu 18.04
 | SecretFile   | Pseudofile addition | Conditionally allow reads of a (host-managed) pseudofile | Yes |  139 | works on ubuntu 18.04
 | PS           | Introspection | List currently running processes | Yes |  144 | works on ubuntu 18.04
-| Attest       | Execution filter | Checksum binaries before they're allowed to run | Yes |  105 | works on ubuntu 18.04
-| LaunchSSH    | Program launcher | WIP | No | - | -
+| Attest       | Execution filter | Checksum binaries before they're allowed to run (TODO: and libraries) | Yes |  105 | works on ubuntu 18.04
+| LaunchSSH    | Program launcher | Restart the ssh daemon | Yes | 106 | works on ubuntu 18.04
+| SBOM         | Introspection | Report hashes of binaries that are run and files mapped into memory | Yes |  202 | works on ubuntu 18.04
