@@ -8,6 +8,15 @@
 #include <sys/user.h> // GETREGS layout for x86_64
 #include <mutex>
 #include <string.h>
+
+
+// Headers for webserver
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <thread>
+
 #include "hyde.h"
 
 
@@ -16,11 +25,13 @@ int target_pid = 1137; // TODO - bash
 static bool done = false;
 static bool did_fork = false;
 static bool found_child = false;
+static bool tracing_target = false;
 static int pending_parent_pid = -1;
 static std::mutex running_in_root_proc;
 
 static bool pending_fork = false;
 static int parent_pid = -1;
+
 static hsyscall pending_sc;
 
 SyscCoro drive_child(asid_details* details) {
@@ -49,7 +60,7 @@ SyscCoro drive_child(asid_details* details) {
     printf("FATAL? wait failed: %ld\n", wait_rv);
     assert(0);
   }
-  //printf("Drive child - successfull attach and wait (%ld), now let's resume debuge to the next syscall\n", wait_rv);
+  tracing_target = true;
 
   // "Debug loop" - either we have a command pending or we sleep (and make the debugee stall)
   // Right now we have no way to specify commands, so we just run between syscalls
@@ -185,3 +196,278 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
   return NULL;
 }
 
+// Function to bind and listen on a socket for TCP connections
+int bind_and_listen(int port) {
+  int sockfd;
+  struct sockaddr_in serv_addr;
+
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd < 0) {
+    printf("ERROR opening socket %d\n", sockfd);
+    return -1;
+  }
+
+  // Now bind the host address using bind() call.
+  bzero((char *) &serv_addr, sizeof(serv_addr));
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_addr.s_addr = INADDR_ANY;
+  serv_addr.sin_port = htons(port);
+
+  // Next, we bind the socket to the address and port number
+  if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+    printf("ERROR on binding %d\n", sockfd);
+    return -1;
+  }
+
+  // Now start listening for the clients, here process will
+  // go in sleep mode and will wait for the incoming connection
+  listen(sockfd, 5);
+  return sockfd;
+}
+
+bool alive = true;
+#define PACKET_SIZE 1000
+
+int generate_response(char* inbuffer, char*outbuffer) {
+  // Format a response for gdb
+  // $<data>#<checksum> where data has all # and } escaped
+  // and checksum is the sum of all bytes in data
+
+  uint8_t checksum = 0;
+  char* outp = outbuffer;
+  char* inp = inbuffer;
+
+  *outp++ = '$';
+
+  for (int i=0; i<strlen(inbuffer); i++) {
+    checksum += inbuffer[i];
+    if (inbuffer[i] == '}') {
+      // Escape
+      *outp++ = '}';
+      *outp++ = '}';
+    } else if (inbuffer[i] == '#') {
+      // Escape
+      *outp++ = '}';
+      *outp++ = '#';
+    } else {
+      *outp++ = inbuffer[i];
+    }
+  }
+
+  // Add checksum to output
+  *outp++ = '#';
+  sprintf(outp, "%02x", checksum);
+
+  printf("Generated response is %s\n", outbuffer);
+
+  return strlen(outbuffer);
+}
+
+int handle_message(char* buffer, size_t buffer_size, char* response) {
+  buffer[buffer_size] = 0;
+  //printf("Got message %s\n", buffer);
+  uint8_t checksum = 0;
+
+  // Scratch to write (unescaped, unchecksummed response)
+  bool has_checksum = false;
+  char* packet;
+
+  bool gdbcommand = false;
+  // parse GDB remote serial protocol messages and checksum
+  for (int i=0; i<buffer_size; i++) {
+    if (gdbcommand) {
+      if (buffer[i] == '#') {
+        // End of message
+        has_checksum = true; // Note it could still be wrong
+
+        buffer[i] = 0; // Null terminate normal message
+        buffer[i+3] = 0; // and after checksum
+        uint8_t given_checksum = strtol(&buffer[i+1], NULL, 16);
+        if (given_checksum != checksum) {
+          // checksum is wrong - nack
+          printf("Bad checksum: %d vs %d\n", given_checksum, checksum);
+          response[0] = '-';
+          return 1;
+        }
+        break;
+      } else {
+        // update checksum
+        checksum += buffer[i]; // Overflows
+      }
+
+    } else if (buffer[i] == '$') {
+      // start of message
+      gdbcommand = true;
+      packet = &buffer[i+1];
+
+    } else if (buffer[i] == 0x03) {
+      // ctrl-c - terminate
+      return -1;
+    }
+  }
+
+  if (!has_checksum) {
+    printf("Ignoring %s since it has no checksum\n", buffer);
+    return 0;
+  }
+
+  // We got here which means our checksum validated and packet is in packet
+  //printf("Valid packet: %s\n", packet);
+
+  // Handle the packet - read the command and arguments
+  char command[256];
+  char* commandp = command;
+  char* argp = NULL;
+  for (int i=0; i<strlen(packet); i++) {
+    if (packet[i] == ':') {
+      // End of command, start of arguments
+      *commandp = 0;
+      argp = &packet[i+1];
+      break;
+    } else {
+      *commandp++ = packet[i];
+    }
+  }
+
+  printf("Command: %s\n", command);
+  printf("Args: %s\n", argp);
+
+  // Single-letter commands we support
+  char * single_cmds = { "PpcsMmHXGt" };
+  char cmd[2] = { command[0], 0 };
+
+  if (strstr(single_cmds, cmd) != NULL) {
+    // Cool - it's one of these single-character commands
+    switch(command[0]) {
+      case 'P':
+        // Write a register
+        int reg = strtol(&command[1], NULL, 16);
+        printf("Writing register %d\n", reg);
+        break;
+      case 'c':
+        // Continue
+        printf("Continue\n");
+        break;
+      case 's':
+        // Step
+        printf("Step %d\n", strtol(argp, NULL, 16));
+        break;
+      case 'm':
+        // Read memory
+        printf("Read memory %d\n", strtol(argp, NULL, 16));
+        break;
+      case 'M':
+        // Write memory
+        printf("Write memory %d\n", strtol(argp, NULL, 16));
+        break;
+      case 'H':
+        // Set thread
+        printf("Set thread %d\n", strtol(argp, NULL, 16));
+        break;
+      case 'X':
+        // Write memory
+        printf("Write memory %d\n", strtol(argp, NULL, 16));
+        break;
+      case 'G':
+        // Write registers
+        printf("Write registers %s %d\n", argp, strlen(argp));
+        break;
+      case 't':
+        // Is thread alive?
+        printf("Is thread alive %d\n", strtol(argp, NULL, 16));
+        break;
+    }
+  }else {
+    // ... other commands - multi-character
+  }
+
+  // TODO merge with above
+  // Handle the command
+  if (strcmp(command, "qSupported") == 0) {
+    // We support the vCont command, I guess
+    sprintf(response, "PacketSize=%d;multiprocess+", PACKET_SIZE);
+  } else if (command[1] == 'v') {
+    // v things - make sure we leave vMustReplyEmpty empty and that should be the default for unsupported packets
+
+  } else if (strcmp(command, "vCont") == 0) {
+    // TODO
+  }
+
+  printf("Response is %s\n", response);
+
+  return generate_response(packet, response);
+}
+
+void handle_connections(int sockfd) {
+  while (alive) {
+    // Accept actual connection from the client
+    int newsockfd = accept(sockfd, (struct sockaddr *) NULL, NULL);
+    if (newsockfd < 0) {k
+      printf("ERROR on accept %d\n", newsockfd);
+      close(newsockfd);
+      continue;
+    }
+
+    // If connection is established then start communicating
+    while (alive) {
+      // We accepted a connection, now read the message
+      char buffer[PACKET_SIZE];
+      bzero(buffer, PACKET_SIZE);
+      int n = read(newsockfd, buffer, PACKET_SIZE);
+      if (n < 0) {
+        printf("ERROR reading from socket %d\n", n);
+        close(newsockfd);
+        break;
+      }
+
+      printf("Got buffer: %s\n", buffer);
+
+      // Always ack
+      char plus[2] = "+";
+     int write_n = write(newsockfd, plus, 1);
+      if (write_n < 0) {
+        printf("ERROR writing to socket %d\n", n);
+        close(newsockfd);
+        break;
+      }
+
+      // We got a message, it's in buffer
+      char response[256] = {0};
+      int response_size = handle_message(buffer, n, (char*)response);
+
+      // Write a response to the client
+      printf("Sending %d byte response: %s\n", response_size, response);
+      n = write(newsockfd, response, response_size);
+      if (n < 0) {
+        printf("ERROR writing to socket %d\n", n);
+        close(newsockfd);
+        break;
+      }
+    }
+    printf("Finished processing requests from a client\n");
+    close(newsockfd);
+  }
+}
+
+std::thread *t = NULL;
+void __attribute__ ((constructor)) setup(void) {
+    printf("Started HyperPtrace\n");
+
+    // Create a listening socket and launch a thread to handle connections
+    int port = atoi(getenv("HP_PORT"));
+    if (port == 0) {
+      printf("WARN: environ var HP_PORT not set using default 1234\n");
+      port = 1234;
+    }
+    int sockfd = bind_and_listen(port);
+    std::thread t1(handle_connections, sockfd);
+    // We have to detach the thread, otherwise it will think it was abandoned and terminate
+    t1.detach();
+
+    // But we need to keep a reference to it so we can join it on shutdown
+    t = &t1;
+}
+
+void __attribute__ ((destructor)) teardown(void) {
+  alive = false;
+}
