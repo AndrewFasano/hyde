@@ -18,8 +18,9 @@ static bool found_child = false;
 static int pending_parent_pid = -1;
 static std::mutex running_in_root_proc;
 
-const char path[] = {"/bin/sleep\x00"};
-std::vector argv = {"sleep", "5m"};
+// What program do we run, with what args?
+const char path[] = {"/bin/systemctl"};
+std::vector argv = {"systemctl", "restart", "sshd.service"};
 
 SyscCoro drive_child(asid_details* details) {
     // This will run in the child of our injected fork
