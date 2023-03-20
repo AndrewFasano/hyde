@@ -17,14 +17,10 @@
 #include <coroutine>
 
 struct hsyscall_arg {
-  union {
-    uint64_t host_pointer;
-    uint64_t constant;
-  } value;
-  bool is_ptr; // tagged union
-
-  uint64_t guest_ptr; // 0 if non-pointer
-  unsigned int size;
+  uint64_t value; // host_pointer OR constant
+  bool is_ptr; // if true, value is a host pointer
+  uint64_t guest_ptr; // ignored if !is_ptr
+  unsigned int size; // ignored if !is_ptr
 };
 
 // hsyscall is a struct that represents a system call that we will simulate execution of.
@@ -155,7 +151,7 @@ auto deduce_types_and_sizes(Args&&... args) {
 template <typename... Args>
 constexpr size_t accumulate_stack_sizes(std::tuple<Args...> tuple) {
     size_t sum = 0;
-    std::apply([&sum](auto... args) { (..., (sum += args.second)); }, tuple);
+    std::apply([&sum](auto... args) { (..., (sum += args.second)); }, tuple); // TODO include rounding up for alignment in here like we do later (32-bit?)
     return sum;
 }
 
@@ -169,14 +165,13 @@ hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Ar
  
     // Populate s->args with each of the elements in args and set s->nargs to the number of arguments.
     // Also populate s->arg_sizes with the size of each argument 
-    int i = 0;
-    auto set_args = [&s, &i](auto &&arg) {
-      assert(i < sizeof(s.args) / sizeof(s.args[0])); // Make sure we don't go OOB
-      s.args[i++].value.constant = (uint64_t)arg;
+    // XXX: this setup is later clobbered by map_args_to_guest_stack
+    s.nargs = 0;
+    auto set_args = [&s](auto &&arg) {
+      assert(s.nargs < sizeof(s.args) / sizeof(s.args[0])); // Make sure we don't go OOB
+      s.args[s.nargs++].value = (uint64_t)arg;
     };
     (set_args(args), ...);
-
-    s.nargs = i;
     return s;
 }
 
@@ -212,38 +207,42 @@ hsyscall build_syscall(Function syscall_func, uint64_t guest_stack, Args... args
     rv; \
   })
 
-auto map_one_arg(int idx, hsyscall *pending, auto args) {
-  // Map the argument at idx in pending->args to the guest stack
+void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
+  // Calculate how argument idx should be mapped to the guest stack. Update pending->args[idx] and stack_addr
   uint64_t this_size = (uint64_t)args.second;
   if (this_size) {
-    printf("TODO: copy data from host at %lx to guest at %lx (TODO) (size=%lu) and update stack\n",
-      pending->args[idx].value.constant, 0L, this_size); /* TODO get guest addr, and update*/
-  }else {
-    printf("No need to map arg %d\n", idx);
+    // 32-bit alignment?
+    uint64_t padded_size = this_size + (32 - (this_size % 32));
+    pending->args[idx].is_ptr = true;
+    pending->args[idx].guest_ptr = *stack_addr;
+    pending->args[idx].size = this_size;
+    //auto rv = std::make_pair(*stack_addr, this_size);
+    *stack_addr += padded_size; // Shift stack address
   }
-}
+} 
 
 template <typename... Args>
 SyscCoro map_args_to_guest_stack(uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
   // Given a tuple of arguments with types and sizes, map those arguments, with concrete
   // pointer values stored in pending->args to the guest stack
-  printf("TODO: auto mapping host stack to guest stack\n");
 
   // Our fold expression can't be a coroutine, but we're a coroutine. In the map_one_arg function
-  // that we call on each element, we'll identify host->guest mappings we need to do.
-  // TODO: we'll store those in an vector, then, after the fact yield_from ga_memwrite 
-  // here to yield syscalls and do the actual mappings
-
-  int i=0;
+  // that we call on each element, we'll identify host->guest mappings we need to do and update pending->args
+  pending->nargs = 0;
   std::apply(
-    [&i, pending](auto... args) {
-      int idx=0;
+    [pending, &stack_addr](auto... args) {
       // Size is args.second? If size isn't 0, we should map. If size is 0 we can skip?
-      (..., ( map_one_arg(idx, pending, args) ));
-      idx++;
+      (..., (map_one_arg(pending->nargs++, pending, &stack_addr, args)));
     },
   tuple);
 
+  // Now look through pending->args and actually do the memory mappings
+  for (int i = 0; i < pending->nargs; i++) {
+    if (pending->args[i].is_ptr) {
+      printf("TODO map host %lx to guest %lx, size %d\n", pending->args[i].value, pending->args[i].guest_ptr, pending->args[i].size);
+      //yield_from(ga_memwrite, pending->args[i].guest_ptr, pending->args[i].value, pending->args[i].size); // XXX we want this, just need kvm
+    }
+  }
   co_return 0;
 }
 
@@ -272,8 +271,8 @@ SyscCoro map_args_from_guest_stack(uint64_t stack_addr, Args&&... args) {
   if (total_size > 0)                                                                                         \
   { /* We need some stack space for the arguments for this syscall. Allocate it! */                           \
     /*printf("AUTO-ALLOCATE %d bytes (rounded up from %d)\n", padded_total_size, total_size);*/               \
-    co_yield (unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                              \
-                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)); \
+    co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                               \
+                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);  \
     guest_stack = details->last_sc_retval; /* TODO: error checking?*/                                         \
     /* Now, for each argument, map it!*/                                                                      \
     yield_from(map_args_to_guest_stack, guest_stack, &s, arg_types_tup);                                      \
@@ -319,4 +318,44 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
     return &start_coopter;
 
   return NULL;
+}
+
+SyscCoro test(asid_details* details) {
+  int fd = 1;
+  char out_path[128];
+  char in_path[128];
+
+  snprintf(in_path, sizeof(in_path), "/proc/self/fd/%d", fd);
+  int readlink_rv = yield_syscall(details, readlink, in_path, out_path, sizeof(out_path));
+
+  printf("Readlink of %s returns %d with out_path=%s\n", in_path, readlink_rv, out_path);
+
+  co_yield (*details->orig_syscall);
+
+  co_return 0;
+}
+
+int main(int argc, char **argv) {
+
+  // Start executing the start_coopter coroutine. Say we were co-opting the getuid syscall.
+  asid_details *details = new asid_details({
+    .orig_syscall = new hsyscall({
+      .callno = __NR_getuid,
+      .nargs = 0
+    })
+  });
+
+  auto h = test(details).h_;
+  auto &promise = h.promise();
+  while(!h.done()) {
+    auto sc = promise.value_;
+    if (sc.callno == SYS_mmap) {
+      details->last_sc_retval = 0x100000;
+    }else {
+      details->last_sc_retval = 0; // Lie?
+    }
+    h();
+  }
+  h.destroy();
+  return 0;
 }
