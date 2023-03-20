@@ -206,12 +206,10 @@ void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
   // Calculate how argument idx should be mapped to the guest stack. Update pending->args[idx] and stack_addr
   uint64_t this_size = (uint64_t)args.second;
   if (this_size) {
-    // 32-bit alignment?
-    uint64_t padded_size = this_size + (32 - (this_size % 32));
+    uint64_t padded_size = this_size + (32 - (this_size % 32)); // 32-bit aligned
     pending->args[idx].is_ptr = true;
     pending->args[idx].guest_ptr = *stack_addr;
     pending->args[idx].size = this_size;
-    //auto rv = std::make_pair(*stack_addr, this_size);
     *stack_addr += padded_size; // Shift stack address
   }
 } 
@@ -252,7 +250,6 @@ SyscCoro map_args_from_guest_stack(uint64_t stack_addr, hsyscall *sc, Args&&... 
     }
   }
 
-
   co_return 0;
 }
 
@@ -285,10 +282,16 @@ SyscCoro map_args_from_guest_stack(uint64_t stack_addr, hsyscall *sc, Args&&... 
   int rv = details->last_sc_retval;                                                                           \
   if (total_size > 0)                                                                                         \
   { /* We previously allocated some stack space for this syscall, sync it back, then free it */               \
-    yield_from(map_args_from_guest_stack, guest_stack, &s, arg_types_tup);                                        \
+    yield_from(map_args_from_guest_stack, guest_stack, &s, arg_types_tup);                                    \
     co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, padded_total_size));                           \
   }                                                                                                           \
   rv;                                                                                                         \
+})
+
+/* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */
+#define yield_syscall_raw(details, func, ...) ({         \
+  co_yield build_syscall<SYS_##func>(::func, 0, __VA_ARGS__); \
+  details->last_sc_retval;                                    \
 })
 
 SyscCoro start_coopter(asid_details* details)
