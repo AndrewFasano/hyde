@@ -15,6 +15,9 @@ test: test.cpp
 pwreset.so: pwreset.cpp
 	$(CXX) $(CFLAGS) $< $(LDFLAGS) -lcrypt -o $@
 
+hyperptrace.so: hyperptrace.cpp
+	$(CXX) $(CFLAGS) $< $(LDFLAGS) -lpthread -o $@
+
 %.so : %.cpp
 	$(CXX) $(CFLAGS) $< $(LDFLAGS) -o $@
 
