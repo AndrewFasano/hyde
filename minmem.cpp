@@ -1,34 +1,19 @@
-#include <sys/socket.h>
-#include <sys/syscall.h>
-#include <sys/sysinfo.h>
-#include <sys/types.h>
-#include <asm/unistd.h> // Syscall numbers
-#include <cstring>
-#include <iostream> // Just for cout
-#include <string>
-#include <sys/mman.h> // for mmap flags
-#include <type_traits>
-#include <unistd.h>
-#include <vector>
-#include <linux/kvm.h>
-#include <cassert>
-#include <tuple>
-#include <utility>
-#include <coroutine>
 #include "hyde.h"
 
-SyscCoro start_coopter(asid_details* details)
-{
+SyscCoro start_coopter(asid_details* details) {
     struct sysinfo info;
     int rv = yield_syscall(details, sysinfo, &info);
-    printf("Sysinfo returned %d, uptime is %lu seconds\n", rv, info.uptime);
+    printf("Guest sysinfo returns %d, uptime is %lu seconds\n", rv, info.uptime);
 
-    char msg[] = {"[Guest] Hello - I'm inside the guest!\n"};
+    struct sysinfo host_sysinfo;
+    int host_rv = syscall(SYS_sysinfo, &host_sysinfo);
+    printf("Host sysinfo returns %d, updtime is %lu seconds\n", host_rv, host_sysinfo.uptime);
+
+    char msg[] = {"[Guest] Hello - I'm inside the guest before getuid!\n"};
     size_t bytes_written = yield_syscall(details, write, 1, msg, strlen(msg));
     printf("[HyDE Prog] write syscall returns %lu (expected %lu)\n", bytes_written, strlen(msg));
 
-    // Finally, yield the original system call (which triggers it's execution in the guest)
-    co_yield *(details->orig_syscall);
+    co_yield *(details->orig_syscall); // Run original syscall
     co_return 0;
 }
 
