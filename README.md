@@ -1,5 +1,52 @@
-# HyDE Capabilities
+# HyDE Programs
 
+Cloud computing, a type of infrastructure-as-service, enables users to run software on hardware owned by a cloud provider.
+Typically, the provider manages their hardware and uses a virtualization layer so a user-managed operating system
+and software can operate independently from any other users who are co-located on the same hardware.
+
+This split in management responsabilities has both benefits and disadvantages for users. Users may
+run any software they want, so long as it supports the deployed virtualization software. However,
+if users misconfigure their system, there are few features their provider can offer to assist.
+
+Typically providers give users a web interface where guest VMs can be powered on/off,
+hardware utilization can be viewed (e.g., CPU usage),
+hardware settings adjusted (e.g., disk size, memory available),
+and a virtual serial console can be accessed.
+
+Both users and providers would benefit if providers were able to provide additional ways for users to
+examine and control their systems. For example, consider the following problems that users may encounter:
+
+## Problems for users of virtualized systems
+* Diagnosing unexpected system behavior  - buggy code, misconfiguration, or malicious actors lead system to take ggunexpected actions. Enumerating processes and interactively debugging them requires accessing the guest and installing new software
+* Lost access to guest system - password forgotten, ssh server or RDP is stopped, crashes, or is misconfigured
+* Programs may be unaware of optimiziations available due to the nature of the virtualized environment
+* Malicious actors can erase logs or disable and reconfugre security policies post-exploitation
+* Users may want out-of-band filesystem access to simplify management of guest system
+* Users may wish to enable out-of-band restrictions on guest behavior
+
+## How these problems are solved today:
+* Diagnosting unexpected system behavior - install debugging/profiling tools inside guest system, enumerate running processes, use installed tools to analyze suspicious processes
+* Lost access - virtualized console access to restart services, shutdown and modify (unencrypted) filesystem to reset password
+* Unaware of optimizations - programs generally cannot take advantage of virtualization-based features that they were not designed to support, unless the kernel enables this
+* Malicious acotrs in guest - logs can be stored remotely which should capture compromise itself, but log forwarding may be disabled post-exploitation
+* Out-of-band filesystem access - providers can build interfaces atop guest-enabled services (i.e., ssh) but users must provide authentication credentials to this interface
+* Out-of-band behavior restrictions - users may limit hardware features (i.e., disable networking), but such restrictions cannot easily be done in software.
+
+These problems, and more, can be solved using our technique, Hypervisor Dissociative Execution which provides a stable interface
+atop which portable programs can be designed that run at the virtualization layer, without the need for guest cooperation.
+Programs can be built atop this interface, that provide information about a guest system's current state, make a one-time modification to the state, collect
+information in perpetuity, or modify system behaviour forever.
+
+These programs can run across guest OSes and OS versions, only needing modifications when the target system's system call interface changes. While these programs are running,
+a modest, 30% slowdown in guest behavior is introduced, but for many users, this may be a worthy trade off.
+
+----
+
+## Problem classes
+* Monitoring or Modification: Does this problem require passively monitoring system or changing its behavior?
+* Must guest run bespoke programs 
+
+----
 
 Whereas a HyDE implementation and its programs are bug-free so they only cause the intended state changes to guest sytems, they may be described as the following.
 
@@ -22,13 +69,6 @@ Must the HP be running from the start of guest boot or can it be loaded on deman
 Is the HyDE program something that runs briefly or persistently during guest execution?
 
 # Problems in Virtualized Environments
-* Identifying unexpected behavior - buggy code, misconfiguration, or malicious actors lead system to take unexpected actions
-* Understanding system behavior - enumerating processes and interactively debugging them requires accessing the guest and installing new software
-* Lost access to guest system - password forgotten, ssh server or RDP is stopped, crashes, or is misconfigured
-* Cannot safely modify guest filesystem while guest is running
-* Guest programs may be unaware of host features that could be used to optimize performance
-* Difficult to enforce security policies - malicious actors in guest can disable and reconfigure security policies post-exploitation
-* Malicious root users in guest have unlimited access to system
 
 # List of HyDE Programs and Applications
 
