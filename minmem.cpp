@@ -1,6 +1,6 @@
 #include "sys/socket.h"
 #include "sys/syscall.h"
-#include "sys/sysinfo.h"
+#include <sys/sysinfo.h>
 #include "sys/types.h"
 #include <asm/unistd.h> // Syscall numbers
 #include <cstring>
@@ -12,11 +12,27 @@
 #include <unistd.h>
 #include <vector>
 #include <linux/kvm.h>
-#include <coroutine>
+#include <assert.h>
+
+#include <type_traits>
+#include <tuple>
+#include <utility>
+
 
 #include <coroutine>
 #include <functional>
 //#include "hyde_common.h"
+
+struct hsyscall_arg {
+  union {
+    uint64_t host_pointer;
+    uint64_t constant;
+  } value;
+  bool is_ptr; // tagged union
+
+  uint64_t guest_ptr; // 0 if non-pointer
+  unsigned int size;
+};
 
 // hsyscall is a struct that represents a system call that we will simulate execution of.
 // Before the syscall is simulated, it should be populated with callno, nargs, and args.
@@ -24,7 +40,7 @@
 typedef struct {
   uint64_t callno; // System call number
   unsigned int nargs; // Number of arguments
-  uint64_t args[6]; // Arguments for the syscall
+ hsyscall_arg args[6]; // Arguments for the syscall
 
   // After we simulate
   uint64_t retval; // Only used when co-opting
@@ -107,66 +123,58 @@ typedef SyscCoro(create_coopt_t)(asid_details*);
 // create_coopt_t is function type that is given a few arguments and returns a function pointer function with type create_coopt_t(asid_details*)
 typedef create_coopt_t*(coopter_f)(void*, long unsigned int, long unsigned int, unsigned int);
 
-// Calculate the size of all arguments in a variadic template
-
-template<typename T>
-constexpr size_t stack_size() {
-    if constexpr (std::is_array_v<T>) {
-      // Array - calculate size
-      return sizeof(typename std::remove_extent<T>::type) * std::extent_v<T>;
-    } else if constexpr (std::is_pointer_v<T>) {
-      // Pointer - calculate size of pointed object
-      return sizeof(typename std::remove_pointer<T>::type);
-    } else {
-      // Non-pointer type, doesn't count
-      return 0;
-    }
+// Series of templates to deduce the size of a variadic list of arguments
+// This is used so we can calculate the necessary stack size in guest
+// memory that we will use for copying hsyscall arguments into the guest's memory
+template <typename T>
+auto deduce_type_and_size_impl(T* arg, std::false_type) {
+    return std::make_pair(arg, sizeof(std::remove_pointer_t<T>));
 }
-
-// Given a list of types, calculate the total size of all non-int arguments
+template <typename T, size_t N>
+auto deduce_type_and_size_impl(T (&arr)[N], std::true_type) {
+    return std::make_pair(arr, sizeof(T) * N);
+}
+template <typename T>
+auto deduce_type_and_size(T&& arg) {
+    return deduce_type_and_size_impl(std::forward<T>(arg), std::is_array<std::remove_reference_t<T>>{});
+}
 template <typename... Args>
-constexpr size_t accumulate_stack_sizes() {
-  // For each in Args, call stack_size and add the result to the sum
-  return (stack_size<Args>() + ...);
+auto deduce_types_and_sizes(Args&&... args) {
+    return std::tuple_cat(std::make_tuple(deduce_type_and_size(std::forward<Args>(args)))...);
 }
 
-/* TODO: replace print_pointer_info. Instead of printing the argument, we should store it in the args field of the hsyscall struct
- * that we've been given in the out pointer.
-*/
-template <typename T>
-void _set_arg(uint64_t *out, uint64_t *cumulative_size, const T& arg, std::integral_constant<bool, true>) {
-  // This argument is a pointer type, so we update cumulative size
-    std::cout << "Argument at " << out << ": Pointer: " << &arg << ", size of pointed object: " << sizeof(typename std::remove_pointer<T>::type) << std::endl;
-    out = 0;
-    *cumulative_size += sizeof(typename std::remove_pointer<T>::type);
+template <typename... Args>
+constexpr size_t accumulate_stack_sizes(std::tuple<Args...> tuple) {
+    size_t sum = 0;
+    std::apply([&sum](auto... args) { (..., (sum += args.second)); }, tuple);
+    return sum;
 }
-template <typename T>
-void _set_arg(uint64_t* out, uint64_t *cumulative_size, const T& arg, std::integral_constant<bool, false>) {
-  *out = (uint64_t)arg;
-  // We don't update cumulative_size here here because this argument isn't a pointer
-}
-template <typename T>
-void set_arg(uint64_t* out, const T& arg) {
-    uint64_t arg_pointer_size = 0;
-    _set_arg(out, &arg_pointer_size, arg, std::is_pointer<T>{});
-}
+
+/* Calculate the total size of the arguments that can't be stored in registers */
+#define get_arg_size(...) ({                                                                     \
+  auto _argTuple = deduce_types_and_sizes(__VA_ARGS__); \
+  size_t total_size = accumulate_stack_sizes(_argTuple); \
+  total_size; \
+})
+
 
 template <long SyscallNumber, typename Function, typename... Args>
-hsyscall* unchecked_build_syscall(Function syscall_func, Args... args) {
+hsyscall* unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
     //printf("Inject syscall %ld with %ld args, total size %ld\n", SyscallNumber, sizeof...(Args), TotalSize);
     // Now generate an hsyscall object with the syscall number, arguments, and number of args
     hsyscall *s = new hsyscall;
     s->callno = SyscallNumber;
  
-    // After validating that the types match, we store the arguments internally as uint64_t's, since those are what
-    // we actually store in guest registers.
-    // TODO: is there any hope of handling char*s and structs with a scratch buffer automatically?
-
-    // Populate s->args with each of the elements in args and set s->nargs to the number of arguments
+    // Populate s->args with each of the elements in args and set s->nargs to the number of arguments.
+    // Also populate s->arg_sizes with the size of each argument 
     int i = 0;
-    (..., set_arg(&s->args[i++], args));
-    s->nargs = i;
+    auto set_args = [&s, &i](auto &&arg) {
+      assert(i < sizeof(s->args) / sizeof(s->args[0])); // Make sure we don't go OOB
+      s->args[i++].value.constant = arg;
+    };
+    (set_args(args), ...);
 
+    s->nargs = i;
     return s;
 }
 
@@ -174,7 +182,7 @@ hsyscall* unchecked_build_syscall(Function syscall_func, Args... args) {
  * and return na hsyscall object
  */
 template <long SyscallNumber, typename Function, typename... Args>
-hsyscall* build_syscall(Function syscall_func, Args... args) {
+hsyscall* build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
     using ReturnType = decltype(syscall_func(std::declval<Args>()...));
     using ExpectedArgsTuple = std::tuple<typename std::remove_reference<Args>::type...>;
     using ActualArgsTuple = std::tuple<typename std::remove_reference<decltype(std::declval<Args>())>::type...>;
@@ -184,7 +192,7 @@ hsyscall* build_syscall(Function syscall_func, Args... args) {
     static_assert(std::is_same_v<ExpectedArgsTuple, ActualArgsTuple>,
                   "Argument types do not match the syscall signature.");
 
-    return unchecked_build_syscall<SyscallNumber>(syscall_func, args...);
+    return unchecked_build_syscall<SyscallNumber>(syscall_func, guest_stack, args...);
 }
 
 /* Helper macro to be used by SyscCoro coroutines. Build an hsyscall using the given function name,
@@ -192,28 +200,29 @@ hsyscall* build_syscall(Function syscall_func, Args... args) {
  * free the heap-allocated hsyscall, and finally provide the caller with the result of the simulated
  * syscall which was set in details->last_sc_ret.
  */
-#define yield_syscall(details, func, ...) ({                                                                                    \
-  constexpr size_t total_size = accumulate_stack_sizes<decltype(__VA_ARGS__)>();                                                \
-  constexpr size_t padded_total_size = total_size + (1024 - (total_size % 1024));                                               \
-  if (total_size > 0)                                                                                                           \
-  { /* We need some stack space for the arguments for this syscall. Allocate it! */                                             \
-    hsyscall *h = unchecked_build_syscall<SYS_mmap>(::mmap, 0, padded_total_size ,                                              \
-               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);                                                     \
-    (co_yield *h);                                                                                                              \
-    free(h);                                                                                                                    \
-    details->guest_stack = details->last_sc_retval;                                                                             \
-  }                                                                                                                             \
-  hsyscall *h = build_syscall<SYS_##func>(::func, ##__VA_ARGS__);                                                               \
-  (co_yield *h);                                                                                                                \
-  free(h);                                                                                                                      \
-  int rv = details->last_sc_retval;                                                                                             \
-  if (total_size > 0)                                                                                                           \
-  { /* We previously allocated some stack space for this syscall, free it */                                                    \
-    hsyscall *h = unchecked_build_syscall<SYS_munmap>(::munmap, details->guest_stack, padded_total_size);                       \
-    (co_yield *h); \
-    free(h); \
-  } \
-  rv; \
+#define yield_syscall(details, func, ...) ({                                                                     \
+  constexpr size_t total_size = get_arg_size<decltype(__VA_ARGS__)>();                                 \
+  constexpr size_t padded_total_size = total_size + (1024 - (total_size % 1024));                                \
+  uint64_t guest_stack = 0;                                                                                           \
+  if (total_size > 0)                                                                                            \
+  { /* We need some stack space for the arguments for this syscall. Allocate it! */                              \
+    hsyscall *h = unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                                \
+                                                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
+    (co_yield *h);                                                                                               \
+    free(h);                                                                                                     \
+    guest_stack = details->last_sc_retval;                                                                       \
+  }                                                                                                              \
+  hsyscall *h = build_syscall<SYS_##func>(::func, guest_stack, __VA_ARGS__);                                                \
+  (co_yield *h);                                                                                                 \
+  free(h);                                                                                                       \
+  int rv = details->last_sc_retval;                                                                              \
+  if (total_size > 0)                                                                                            \
+  { /* We previously allocated some stack space for this syscall, free it */                                     \
+    hsyscall *h = unchecked_build_syscall<SYS_munmap>(::munmap, 0, padded_total_size);        \
+    (co_yield *h);                                                                                               \
+    free(h);                                                                                                     \
+  }                                                                                                              \
+  rv;                                                                                                            \
 })
 
 SyscCoro start_coopter(asid_details* details)
@@ -224,9 +233,12 @@ SyscCoro start_coopter(asid_details* details)
     // Every call to yield_syscall will automatically map, use, then unmap memory as necessary for its arguments
 
     // Simulate running the sysinfo system call and get the result.
+    printf("\nRun sysinfo syscall with %lu byte argument\n", sizeof(info));
     int rv = yield_syscall(details, sysinfo, &info);
 
     char msg[] = {"Hello from the coopter!\n"};
+    printf("\n\nRun write syscall with %lu byte argument\n", sizeof(msg));
+    printf("CALLER: msg is at %p, has size %lu\n", msg, sizeof(msg));
     int rv2 = yield_syscall(details, write, 1, msg, strlen(msg));
 
     // Finally, yield the original system call (which triggers it's execution in the guest)
