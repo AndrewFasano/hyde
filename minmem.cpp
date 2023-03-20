@@ -99,10 +99,6 @@ typedef struct _asid_details {
 
   unsigned long custom_return; // If set to a non-zero value, we will set the guest's program counter to this address after coopter finishes
 
-  bool did_malloc;
-  uint64_t guest_stack;
-  uint64_t guest_stack_end;
-
   //std::function<void(_asid_details*, void*, unsigned long, unsigned long, unsigned long)> *on_ret; // Unused
 } asid_details;
 
@@ -151,7 +147,8 @@ auto deduce_types_and_sizes(Args&&... args) {
 template <typename... Args>
 constexpr size_t accumulate_stack_sizes(std::tuple<Args...> tuple) {
     size_t sum = 0;
-    std::apply([&sum](auto... args) { (..., (sum += args.second)); }, tuple); // TODO include rounding up for alignment in here like we do later (32-bit?)
+    // Round up to 32-bits - this matches how we actually allocate these things later
+    std::apply([&sum](auto... args) { (..., (sum += (args.second + (32 - (args.second % 32)))) ); }, tuple);
     return sum;
 }
 
@@ -164,11 +161,9 @@ hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Ar
     };
  
     // Populate s->args with each of the elements in args and set s->nargs to the number of arguments.
-    // Also populate s->arg_sizes with the size of each argument 
-    // XXX: this setup is later clobbered by map_args_to_guest_stack
     s.nargs = 0;
     auto set_args = [&s](auto &&arg) {
-      assert(s.nargs < sizeof(s.args) / sizeof(s.args[0])); // Make sure we don't go OOB
+      assert(s.nargs < sizeof(s.args) / sizeof(s.args[0])); // Make sure we don't go OOB (is this off by 1?)
       s.args[s.nargs++].value = (uint64_t)arg;
     };
     (set_args(args), ...);
@@ -299,7 +294,6 @@ SyscCoro map_args_from_guest_stack(uint64_t stack_addr, hsyscall *sc, Args&&... 
 SyscCoro start_coopter(asid_details* details)
 {
     struct sysinfo info;
-    details->did_malloc = false;
 
     // Every call to yield_syscall will automatically map, use, then unmap memory as necessary for its arguments
 
@@ -338,6 +332,14 @@ SyscCoro test(asid_details* details) {
   int readlink_rv = yield_syscall(details, readlink, in_path, out_path, sizeof(out_path));
 
   printf("Readlink of %s returns %d with out_path=%s\n", in_path, readlink_rv, out_path);
+
+  struct sysinfo info;
+  yield_syscall(details, sysinfo, &info);
+  printf("Guest uptime is %lu seconds\n", info.uptime);
+
+  char msg[] = {"Hello from the coopter!\n"};
+  int bytes_written = yield_syscall(details, write, 1, msg, strlen(msg));
+  printf("Wrote %d bytes into guest (expected %lu)\n", bytes_written, strlen(msg));
 
   co_yield (*details->orig_syscall);
 
