@@ -35,8 +35,7 @@ SyscCoro start_coopter(asid_details* details) {
   char path[256];
   SHA_CTX context;
   bool fail = false;
-  ga* guest_buf;
-  ga* path_ptr;
+  uint64_t path_ptr;
 
   if (!SHA1_Init(&context)) {
     printf("[Attest] Unable to initialize sha context\n");
@@ -44,18 +43,14 @@ SyscCoro start_coopter(asid_details* details) {
     goto out;
   }
 
-  path_ptr = (ga*)get_arg(regs, 0); 
+  path_ptr = get_arg(regs, 0); 
   if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
       printf("[Attest] Unable to read filename at %lx\n", (uint64_t)path_ptr);
       rv = -1;
       goto out;
   }
-  guest_buf = (ga*)yield_syscall(details, __NR_mmap,
-      /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
-      /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
 
-  // Open target binary for reading
-  guest_fd = (int)yield_syscall(details, __NR_open, path_ptr, O_RDONLY);
+  guest_fd = (int)yield_syscall(details, open, path_ptr, O_RDONLY);
   if (guest_fd < 0) {
     printf("[Attest] Could not open %s", path);
     rv = -1;
@@ -64,14 +59,8 @@ SyscCoro start_coopter(asid_details* details) {
     // Read file until we hit EOF, update sha1sum as we go
     while (true) {
       char host_data[BUF_SZ];
-      int bytes_read = yield_syscall(details, __NR_read, guest_fd, (__u64)guest_buf, BUF_SZ);
+      int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
       if (bytes_read == 0) break;
-
-      if (yield_from(ga_memcpy, details, host_data, guest_buf, bytes_read) == -1) {
-        printf("[Attest] Unable to read file data at %lx\n", (uint64_t)guest_buf);
-        fail = true;
-        break;
-      }
 
       if (!SHA1_Update(&context, host_data, bytes_read)) {
         printf("[Attest] Unable to update sha context\n");
@@ -107,10 +96,8 @@ SyscCoro start_coopter(asid_details* details) {
       }
     }
 
-    yield_syscall(details, __NR_close, guest_fd);
+    yield_syscall(details, close, guest_fd);
   }
-
-  yield_syscall(details, __NR_munmap, guest_buf, BUF_SZ);
 
 out:
   co_yield *(details->orig_syscall);
