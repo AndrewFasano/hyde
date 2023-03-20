@@ -247,8 +247,17 @@ SyscCoro map_args_to_guest_stack(uint64_t stack_addr, hsyscall *pending, std::tu
 }
 
 template <typename... Args>
-SyscCoro map_args_from_guest_stack(uint64_t stack_addr, Args&&... args) {
-  printf("Mapping args FROM guest stack TODO - NYI\n");
+SyscCoro map_args_from_guest_stack(uint64_t stack_addr, hsyscall *sc, Args&&... args) {
+  // We just ran syscall sc, iterate through it's arguments, identifying poitners and yield syscalls to map them back
+
+  for (int i = 0; i < sc->nargs; i++) {
+    if (sc->args[i].is_ptr) {
+      printf("TODO map guest %lx to host %lx, size %d\n", sc->args[i].guest_ptr, sc->args[i].value, sc->args[i].size);
+      //yield_from(ga_memread, pending->args[i].value, pending->args[i].guest_ptr, pending->args[i].size); // XXX we want this, just need kvm
+    }
+  }
+
+
   co_return 0;
 }
 
@@ -281,7 +290,7 @@ SyscCoro map_args_from_guest_stack(uint64_t stack_addr, Args&&... args) {
   int rv = details->last_sc_retval;                                                                           \
   if (total_size > 0)                                                                                         \
   { /* We previously allocated some stack space for this syscall, sync it back, then free it */               \
-    yield_from(map_args_from_guest_stack, guest_stack, arg_types_tup);                                        \
+    yield_from(map_args_from_guest_stack, guest_stack, &s, arg_types_tup);                                        \
     co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, padded_total_size));                           \
   }                                                                                                           \
   rv;                                                                                                         \
