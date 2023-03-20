@@ -99,7 +99,7 @@ SyscCoro find_child_proc(asid_details* details) {
     co_return 0;
 }
 
-SyscCoro start_coopter(asid_details* details) {
+SyscCoro fork_root_proc(asid_details* details) {
     int rv = 0;
     int fd;
     int pid;
@@ -148,7 +148,7 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
         return &find_child_proc;
 
     if (!done)
-        return &start_coopter;
+        return &fork_root_proc;
 
   return NULL;
 }
