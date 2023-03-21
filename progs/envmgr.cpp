@@ -6,6 +6,7 @@
 #include <vector>
 #include "hyde.h"
 
+
 SyscCoro start_coopter(asid_details* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
@@ -16,36 +17,36 @@ SyscCoro start_coopter(asid_details* details) {
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
-  ga* injected_arg;
   int i=0;
+  char* zero = NULL;
+  uint64_t injected_arg;
+
 
   // Create guest and host envp references and use to read arguments out
 
   #if 0
   // Debug: print program name after reading it out of memory (sanity check)
   char progname[128];
-  if (yield_from(ga_memcpy, details, progname, (ga*)get_arg(regs, 0), sizeof(progname)) != -1) {
+  if (yield_from(ga_memread, details, progname, (ga*)get_arg(regs, 0), sizeof(progname)) != -1) {
     printf("Execve is launching %s\n", progname);
   }
   #endif
 
-  ga* guest_envp = (ga*)get_arg(regs, 2); // Guest pointer
-
-  printf("Reading envp from %lx\n", (uint64_t)guest_envp);
+  uint64_t *guest_envp = (uint64_t*)get_arg(regs, (RegIndex)2); // Guest pointer
 
   for (int i=0; i < 255; i++) {
-    uint64_t host_envp;
+    uint64_t envp;
     char env_val[128];
     // Read out the guest pointer to the next env var
-    if (yield_from(ga_memcpy, details, &host_envp, &guest_envp[i], sizeof(host_envp)) == -1) {
+    if (yield_from(ga_memread, details, &envp, (uint64_t)&guest_envp[i], sizeof(envp)) == -1) {
       printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
       co_return -1;
     }
-    if (host_envp == 0) break;
+    if (envp == 0) break;
 
     // Read out the value of the env var
-    if (yield_from(ga_memcpy, details, &env_val, (ga*)host_envp, sizeof(env_val)) == -1) {
-      printf("[EnvMgr] Error reading envp[%d] at gva %lx, not checking for duplicate name\n", i, (uint64_t)host_envp);
+    if (yield_from(ga_memread, details, &env_val, envp, sizeof(env_val)) == -1) {
+      printf("[EnvMgr] Error reading envp[%d] at gva %lx, not checking for duplicate name\n", i, (uint64_t)envp);
       strcpy(env_val, "[MEM ERROR]");
       goto save_ptrs;
     }
@@ -55,9 +56,11 @@ SyscCoro start_coopter(asid_details* details) {
       continue;
     }
 
+    //printf("Existing var at GVA %lx is %s\n", envp, env_val);
+
     save_ptrs:
     // Save both strings and pointers for each env var
-    guest_arg_ptrs.push_back(host_envp);
+    guest_arg_ptrs.push_back(envp);
     arg_list.push_back(std::string(env_val));
   }
 
@@ -66,7 +69,7 @@ SyscCoro start_coopter(asid_details* details) {
   // injected variable. Finally, we need to change the `envp` that will be
   // used by the original execve to point to the start of our pointer list
 
-  ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap,
+  uint64_t guest_buf = yield_syscall(details, mmap,
       /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
       /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
 
@@ -80,44 +83,44 @@ SyscCoro start_coopter(asid_details* details) {
   // Save start of guest buffer
   injected_arg = guest_buf;
 
-  // Get a host pointer that we can use to access guest_buf
-  char* host_buf;
-  if(yield_from(ga_map, details, guest_buf, (void**)&host_buf, 1024) == -1) {
-    printf("[EnvMgr] Error mapping allocated guest buffer from gva %lx\n", (uint64_t)guest_buf );
+  // Write our `inject` string into buffer, will have address saved at injected_arg
+  char* inject_c = (char*)inject.c_str();
+  printf("Writing new string at %lx\n", guest_buf);
+  if (yield_from(ga_memwrite, details, guest_buf, (void*)inject_c, inject.length()+1) == -1) {
+    printf("[EnvMgr] Error writing %lu bytes from hva %lx to gva %lx\n", inject.length()+1, (uint64_t)inject_c, guest_buf);
     goto cleanup_buf;
   }
 
-  // Write our `inject` string into buffer, save it's guest addr
-  strncpy(host_buf, inject.c_str(), inject.length());
   // Then increment guest_buf to be right after our string plus a null byte
-  guest_buf += inject.length();
+  guest_buf += inject.length()+1; // Keep null terminator?
+  guest_buf = (guest_buf + 32) - ((guest_buf + 32) % 32); // Align to 32 bytes
 
   // Now write each of the original env pointers into the buffer
-  char** newenvp;
   for (auto &env_item : guest_arg_ptrs) {
-    if (yield_from(ga_map, details, &guest_buf[i], (void**)&newenvp, 128) == -1) {
+    if (yield_from(ga_memwrite, details, guest_buf + (i * sizeof(uint64_t)), (void**)&env_item, sizeof(char*)) == -1) {
       printf("[EnvMgr] Error mapping pointer for value %d\n", i);
       goto cleanup_buf;
     }
-    *newenvp = (char*)env_item;
     i++;
   }
 
+  // Note, we could also construct a char[][] array on our host here, fill it with pointers,
+  // then cast it to a char[] and yield an execve syscall with execve(orig_arg(0), orig_arg(1), host_envp)
+
   // Add our new variable, then a null terminator
-  if (yield_from(ga_map, details, &guest_buf[i], (void**)&newenvp, sizeof(injected_arg)) == -1) {
+  printf("Write new var pointer at %lx (points to %lx)\n", (guest_buf + (i * sizeof(uint64_t))), (uint64_t)&injected_arg );
+  if (yield_from(ga_memwrite, details, guest_buf + (i * sizeof(uint64_t)), (void*)&injected_arg, sizeof(char*)) == -1) {
     printf("[EnvMgr] Error mapping pointer for injected variable\n");
     goto cleanup_buf;
   }
-  *newenvp = (char*)injected_arg;
 
-  if (yield_from(ga_map, details, &guest_buf[i+1], (void**)&newenvp, 1) == -1) {
+  if (yield_from(ga_memwrite, details, guest_buf + ((i+1) * sizeof(uint64_t)), (void**)&zero, sizeof(char*)) == -1) {
     printf("[EnvMgr] Error mapping pointer for null terminator\n");
     goto cleanup_buf;
   }
-  *newenvp = (char*)0;
 
   // Finally, update the original (execve) syscall so arg2 points to our buffer
-  details->orig_syscall->args[2] = (__u64)guest_buf;
+  details->orig_syscall->args[2].value = (uint64_t)guest_buf;
 
   // Inject the modified syscall, then be done
   co_yield *(details->orig_syscall); // noreturn
@@ -126,7 +129,8 @@ SyscCoro start_coopter(asid_details* details) {
 
 cleanup_buf: // We have failed after allocating memory, clean it up
   //printf("[EnvMgr] Deallocate buffer at %llx for error\n", (__u64)injected_arg);
-  yield_syscall(details, __NR_munmap, injected_arg, 1024);
+  yield_syscall(details, munmap, injected_arg, 1024);
+
   co_yield *(details->orig_syscall); // noreturn
   co_return -1;
 }
@@ -134,7 +138,7 @@ cleanup_buf: // We have failed after allocating memory, clean it up
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
                              long unsigned int pc, unsigned int asid) {
   // We inject syscalls starting at every execve
-  if (callno == __NR_execve)
+  if (callno == SYS_execve)
     return &start_coopter;
   return NULL;
 }
