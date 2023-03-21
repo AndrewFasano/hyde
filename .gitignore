@@ -1,4 +1,5 @@
 *.so
+*.o
 *.sw*
 compile_commands.json
 .vscode/

@@ -210,8 +210,4 @@ SyscCoro map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, h
   details->last_sc_retval;                                    \
 })
 
-
-
-
-
 #endif

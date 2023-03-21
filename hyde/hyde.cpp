@@ -1,6 +1,6 @@
 // Non-KVM code to use with HyDE programs
 
-#include "hyde_ext.h"
+#include "hyde.h"
 
 #define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
 
@@ -152,7 +152,7 @@ SyscCoro ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_size) {
   __u64 _gva = (uint64_t)gva & (uint64_t)-1;
 
   struct kvm_translation trans = { .linear_address = _gva };
-  assert(kvm_vcpu_ioctl(r->cpu, KVM_TRANSLATE, &trans) == 0);
+  assert(kvm_vcpu_ioctl_ext(r->cpu, KVM_TRANSLATE, &trans) == 0);
 
   // Translation failed on base address - not in our TLB, maybe paged out
   if (trans.physical_address == (unsigned long)-1) {
@@ -160,7 +160,7 @@ SyscCoro ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_size) {
 
       // Now retry. if we fail again, bail
       //printf("Retrying to read %llx\n", trans.linear_address);
-      assert(kvm_vcpu_ioctl(r->cpu, KVM_TRANSLATE, &trans) == 0);
+      assert(kvm_vcpu_ioctl_ext(r->cpu, KVM_TRANSLATE, &trans) == 0);
       //printf("\t result: %llx\n", trans.physical_address);
       if (trans.physical_address == (unsigned long)-1) {
         printf("Oh no we double fail mapping %llx\n", _gva);
@@ -170,8 +170,8 @@ SyscCoro ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_size) {
 
   // Translation has succeeded, we have the guest physical address
   // Now translate that to the host virtual address
-  __u64 hva;
-  assert(kvm_host_addr_from_physical_physical_memory(trans.physical_address, &hva) == 1);
+  uint64_t hva;
+  assert(kvm_host_addr_from_physical_memory_ext(trans.physical_address, &hva) == 1);
   (*host) = (void*)hva;
 
   co_return 0;

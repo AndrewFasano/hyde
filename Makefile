@@ -3,23 +3,36 @@
 # I'm getting internal compiler errors now so let's give clang a shot!
 
 CXX=clang++-15
-CFLAGS=-shared -g -I../qemu/accel/kvm/ -std=c++20 -fPIC
+CFLAGS=-g -I../qemu/accel/kvm/ -I./hyde/ -std=c++20
+SO_CFLAGS=-fPIC -shared $(CFLAGS)
 LDFLAGS=
 
 
-all: attest.so envmgr.so hyperptrace.so sharedfolder.so pre_write.so
+SRCS = $(wildcard caps/*.cpp)
+PROGS = $(patsubst %.cpp,%.so,$(SRCS))
+
+HYDE = $(wildcard hyde/*.cpp)
+HYDE_O = $(patsubst %.cpp,%.o,$(HYDE))
+
+all: $(PROGS)
 
 test: test.cpp
-	$(CXX) --std=c++20 -g $< -o $@
+	$(CXX) $(CFLAGS) $< -o $@
 
-pwreset.so: pwreset.cpp
-	$(CXX) $(CFLAGS) $< $(LDFLAGS) -lcrypt -o $@
+$(HYDE_O): $(HYDE)
+	$(CXX) $(CFLAGS) -c $< -o $@
 
-hyperptrace.so: hyperptrace.cpp
-	$(CXX) $(CFLAGS) $< $(LDFLAGS) -lpthread -o $@
+# Pwreset needs link with crypt
+caps/pwreset.so: caps/pwreset.cpp  $(HYDE_O)
+	$(CXX) $(SO_CFLAGS) $< $(LDFLAGS) $(HYDE_O) -lcrypt -o $@
 
-%.so : %.cpp
-	$(CXX) $(CFLAGS) $< $(LDFLAGS) -o $@
+# Hyperptrace needs link with pthread
+caps/hyperptrace.so: caps/hyperptrace.cpp $(HYDE_O)
+	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -lpthread -o $@
+
+# Normal programs
+caps/%.so : caps/%.cpp $(HYDE_O)
+	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -o $@
 
 clean:
-	rm -f *.so
+	rm -f $(PROGS) $(HYDE_P)
