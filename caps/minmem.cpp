@@ -1,3 +1,4 @@
+#include <sys/sysinfo.h>
 #include "hyde.h"
 
 SyscCoro start_coopter(asid_details* details) {

@@ -44,13 +44,14 @@ SyscCoro start_coopter(asid_details* details) {
   }
 
   path_ptr = get_arg(regs, 0); 
-  if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
+  if (yield_from(ga_memread, details, path, path_ptr, sizeof(path)) == -1) {
       printf("[Attest] Unable to read filename at %lx\n", (uint64_t)path_ptr);
       rv = -1;
       goto out;
   }
 
-  guest_fd = (int)yield_syscall(details, open, path_ptr, O_RDONLY);
+  guest_fd = (int)yield_syscall(details, open, path_ptr, O_RDONLY); // XXX: type mismatch/ open wants a char, but we have a uint64_t - what's gonna happen? 
+                                              // Will we map the uint? Will we raise a type error? Could we mark it as a guest pointer with some weird cast?
   if (guest_fd < 0) {
     printf("[Attest] Could not open %s", path);
     rv = -1;
