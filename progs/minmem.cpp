@@ -15,7 +15,7 @@ SyscCoro start_coopter(asid_details* details) {
     printf("[HyDE Prog] write syscall returns %lu (expected %lu)\n", bytes_written, strlen(msg));
 
     co_yield *(details->orig_syscall); // Run original syscall
-    co_return 0;
+    co_return ExitStatus::FINISHED;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno, long unsigned int pc, unsigned int asid) {
