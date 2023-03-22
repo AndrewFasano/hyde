@@ -22,6 +22,7 @@
 
 int target_pid = 1137; // TODO - bash
 
+static bool finished = false;
 static bool done = false;
 static bool did_fork = false;
 static bool found_child = false;
@@ -71,25 +72,25 @@ struct regs_struct {
   uint32_t gs;
 };
 
-SyscCoro drive_child(asid_details* details) {
+SyscCoroHelper drive_child(asid_details* details) {
   signed long wait_rv;
 
   // We drive the child process we created, making it attach to the target process with ptrace,
   // then we allow the target process to run up to the next syscall.
 
   // First allocate scratch buffer
-  ga* guest_buf = (ga*)yield_syscall(details, __NR_mmap, NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+  uint64_t guest_buf = yield_syscall(details, mmap, NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 
   // Next, request to attach to our target process.
   // Yield a syscall to attach with ptrace to target_pid
   // This will cause the target process to stop (SIGSTOP) soon, and we'll see it with waitid
-  int ptrace_rv = yield_syscall(details, __NR_ptrace, PTRACE_ATTACH, target_pid, 0, 0);
+  int ptrace_rv = yield_syscall(details, ptrace, PTRACE_ATTACH, target_pid, 0, 0);
   //printf("Ptrace attach to %d returns %d\n", target_pid, ptrace_rv);
 
   // Wait until the target is stopped
   do {
     // We'll see -EINTR a lot (telling us to retry) so let's handle that
-    wait_rv = yield_syscall(details, __NR_waitid, P_PID, target_pid, (long unsigned)guest_buf, WSTOPPED, 0);
+    wait_rv = yield_syscall(details, waitid, P_PID, target_pid, (long unsigned)guest_buf, WSTOPPED, 0);
     //printf("Waitid returns %ld\n", wait_rv);
   } while (wait_rv == -EINTR);
 
@@ -110,7 +111,7 @@ SyscCoro drive_child(asid_details* details) {
     printf("Pending_command is %c\n", pending_command[0]);
 
     if (pending_command[0] == 'g') {
-      long int greg_rv = (long int)yield_syscall(details, __NR_ptrace, PTRACE_GETREGS, target_pid, 0, (long unsigned)guest_buf);
+      long int greg_rv = (long int)yield_syscall(details, ptrace, PTRACE_GETREGS, target_pid, 0, (long unsigned)guest_buf);
       if (yield_from(ga_memread, details, &gregs, guest_buf, sizeof(user_regs_struct)) != 0) {
         printf("Failed to read gregs struct from guest memory\n");
         assert(0);
@@ -120,7 +121,7 @@ SyscCoro drive_child(asid_details* details) {
       //printf("Read memory from %lx, size %lx\n", pending_mem_addr, pending_mem_size);
       // Read raw bytes into raw_buf, then convert to ascii in pending_mem_buf
       char* raw_buf = (char*)malloc(pending_mem_size*2);
-      if (yield_from(ga_memread, details, raw_buf, (ga*)(uint64_t)pending_mem_addr, pending_mem_size) != 0) {
+      if (yield_from(ga_memread, details, raw_buf, pending_mem_addr, pending_mem_size) != 0) {
         printf("Failed to read memory from guest memory\n");
         free(raw_buf);
         pending_mem_buf = NULL;
@@ -140,15 +141,8 @@ SyscCoro drive_child(asid_details* details) {
         .tv_sec = 1,
         .tv_nsec = 0,
       };
-
-      if (yield_from(ga_memwrite, details, guest_buf, &req_h, sizeof(timespec)) != 0) {
-        printf("Failed to write timespec to guest memory\n");
-        assert(0);
-      }
-
-      __u64 req_guest = (__u64)guest_buf;
-      __u64 rem_guest = (__u64)guest_buf + sizeof(timespec);
-      yield_syscall(details, __NR_nanosleep, guest_buf, (ga*)(uint64_t)guest_buf + sizeof(timespec));
+      timespec remain;
+      yield_syscall(details, nanosleep, &req_h, &remain);
     } else {
       printf("Unsupported pending command: %c. IGNORING (TODO)\n", pending_command[0]);
       pending_command[0] = (char)0;
@@ -157,7 +151,7 @@ SyscCoro drive_child(asid_details* details) {
     // Resume debugee execution until it next stops XXX is this just continue?
     #if 0
     do {
-      wait_rv = yield_syscall(details, __NR_waitid, P_PID, target_pid, (long unsigned)guest_buf, WSTOPPED|WEXITED, 0);
+      wait_rv = yield_syscall(details, waitid, P_PID, target_pid, (long unsigned)guest_buf, WSTOPPED|WEXITED, 0);
       //printf("Waitid2 returns %ld\n", wait_rv);
     } while (wait_rv == -EINTR);
 
@@ -166,7 +160,7 @@ SyscCoro drive_child(asid_details* details) {
       assert(0);
     }
 
-    int tmp_peek = yield_syscall(details, __NR_ptrace, PTRACE_PEEKUSER, target_pid, 0, (long unsigned)guest_buf);
+    int tmp_peek = yield_syscall(details, ptrace, PTRACE_PEEKUSER, target_pid, 0, (long unsigned)guest_buf);
 
     //printf("Peek returns %d\n", tmp_peek);
 
@@ -177,28 +171,29 @@ SyscCoro drive_child(asid_details* details) {
   #endif
   }
 
-  // Finish? XXX want core platform to discard this asid? - should inejct exit
-  yield_syscall(details, __NR_exit, 0);
-  co_return 0;
+  // All done - set finished and kill this process - note we won't continue execution
+  finished = true;
+  yield_syscall(details, exit, 0);
+  assert(0 && "Unreachable");
 }
 
 SyscCoro find_child_proc(asid_details* details) {
 
-    int pid = yield_syscall(details, __NR_getpid);
-    int ppid = yield_syscall(details, __NR_getppid);
-    int tid = yield_syscall(details, __NR_gettid);
+    int pid = yield_syscall0(details, getpid);
+    int ppid = yield_syscall0(details, getppid);
+    int tid = yield_syscall0(details, gettid);
 
     if (ppid == pending_parent_pid) {
         printf("Found child: %d %d parent is %d\n", pid, tid, ppid);
         found_child = true;
 
-        yield_from(drive_child, details);
-        //assert(0 && "Unreachable");
-        co_return 0;
+        if (yield_from(drive_child, details) != 0) { // No return on success
+          co_return ExitStatus::SINGLE_FAILURE;
+      }
     }
 
     co_yield *(details->orig_syscall);
-    co_return 0;
+    co_return ExitStatus::SUCCESS;
 }
 
 SyscCoro fork_root_proc(asid_details* details) {
@@ -207,28 +202,32 @@ SyscCoro fork_root_proc(asid_details* details) {
     int pid;
 
     if (!done) {
-      if (yield_syscall(details, __NR_geteuid)) {
-          rv = -1;
-      }else {
+      if (yield_syscall0(details, geteuid) == 0) {
         if (!running_in_root_proc.try_lock()) {
             // Lock unavailable, bail on this coopter
             // Note we don't want to wait since that would block a guest proc
             rv = -1;
         } else if (!done) {
-          pid = yield_syscall(details, __NR_getpid);
+          pid = yield_syscall0(details, getpid);
           pending_parent_pid = pid;
 
           did_fork = true;
-          yield_syscall(details, __NR_fork);
+          yield_syscall0(details, fork);
 
           done=true;
           running_in_root_proc.unlock();
         }
       }
     }
+    co_yield *(details->orig_syscall);
+    co_return ExitStatus::SUCCESS;
+}
 
-    co_yield *(details->orig_syscall); // noreturn
-    co_return rv;
+SyscCoro indicate_success(asid_details* details) {
+    // Simple coro to change nothing, but indicate that we're done
+    // This runs after we execve'd and abandoned that child
+    co_yield *(details->orig_syscall);
+    co_return ExitStatus::FINISHED;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
@@ -240,6 +239,9 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
 
     if (!done)
         return &fork_root_proc;
+
+    if (finished)
+        return &indicate_success;
 
   return NULL;
 }
