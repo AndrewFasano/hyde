@@ -17,86 +17,91 @@ const std::vector<const char*> known_hashes = {"0648f41a6c74f78414a330c299fda56b
 
 
 #define BUF_SZ 1024
-SyscCoro start_coopter(asid_details* details) {
+SyscCoro pre_execve(asid_details* details) {
   // Before we exec a binary, read it off disk and calculate its hash
   // OPTIONAL: read it into a MEMFD, hash that, then execfd it
 
   // Get guest registers so we can examine the first argument
-  int rv = 0;
-  std::string buffer;
+  ExitStatus rv = ExitStatus::SUCCESS;
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
-  int guest_fd;
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
   unsigned hash[5] = {0};
-  char buf[41] = {0};
-  char path[256];
   SHA_CTX context;
   bool fail = false;
-  uint64_t path_ptr;
 
   if (!SHA1_Init(&context)) {
     printf("[Attest] Unable to initialize sha context\n");
-    rv = -1;
-    goto out;
+    co_yield *(details->orig_syscall);
+    co_return ExitStatus::FATAL;
   }
 
-  path_ptr = get_arg(regs, 0); 
+  char path[256];
+  uint64_t path_ptr = get_arg(regs, RegIndex::ARG0); 
   if (yield_from(ga_memread, details, path, path_ptr, sizeof(path)) == -1) {
       printf("[Attest] Unable to read filename at %lx\n", (uint64_t)path_ptr);
-      rv = -1;
-      goto out;
+      co_yield *(details->orig_syscall);
+      co_return ExitStatus::SINGLE_FAILURE;
   }
 
-  guest_fd = (int)yield_syscall(details, open, path_ptr, O_RDONLY); // XXX: type mismatch/ open wants a char, but we have a uint64_t - what's gonna happen? 
-                                              // Will we map the uint? Will we raise a type error? Could we mark it as a guest pointer with some weird cast?
+  int guest_fd = (int)yield_syscall(details, open, path_ptr, O_RDONLY); // There's a type mismatch here - but our macros don't raise an error. Weird... That's what we want in this case though.
   if (guest_fd < 0) {
     printf("[Attest] Could not open %s", path);
-    rv = -1;
-  } else {
+    co_yield *(details->orig_syscall);
+    co_return ExitStatus::SINGLE_FAILURE;
+  }
 
-    // Read file until we hit EOF, update sha1sum as we go
-    while (true) {
-      char host_data[BUF_SZ];
-      int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
-      if (bytes_read == 0) break;
+  // Read file until we hit EOF, update sha1sum as we go
+  while (true) {
+    char host_data[BUF_SZ];
 
-      if (!SHA1_Update(&context, host_data, bytes_read)) {
-        printf("[Attest] Unable to update sha context\n");
-        fail = true;
-        break;
-      }
+    int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
+    if (bytes_read < 0) {
+      printf("[Attest] Reading file failed with errno: %d\", bytes_read");
+      rv = ExitStatus::SINGLE_FAILURE;
+      goto close_fd;
     }
+    if (bytes_read == 0) break;
 
-    if (!fail) {
-      unsigned char hash[SHA_DIGEST_LENGTH];
-      if (!SHA1_Final(hash, &context)) {
-        printf("[Attest] Unable to finalize sha context\n");
-        rv = -1;
-      } else {
-        // Turn our sha1sum into a digest string
-        char digest[SHA_DIGEST_LENGTH*2];
-        int i = 0;
-        for (i=0; i < SHA_DIGEST_LENGTH; i++) {
-            sprintf((char*)&(digest[i*2]), "%02x", hash[i]);
-        }
+    if (!SHA1_Update(&context, host_data, bytes_read)) {
+      printf("[Attest] Unable to update sha context\n");
+      fail = true; // Need to cleanup
+      break;
+    }
+  }
 
-        // CHeck if this is a known file, if so does the hash match?
-        for (int i = 0; i < known_files.size(); i++) {
-          if (strcmp(path, known_files[i]) == 0) {
-            if (strcmp(digest, known_hashes[i]) != 0) {
-              printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not expected %s\n", path, digest, known_hashes[i]);
-              goto hash_mismatch;
-            } else {
-              //printf("[Attest] Executing %s with good sha1sum of %s\n", path, digest);
-            }
+  if (!fail) {
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    if (!SHA1_Final(hash, &context)) {
+      printf("[Attest] Unable to finalize sha context\n");
+      rv = ExitStatus::SINGLE_FAILURE;
+    } else {
+
+      // Turn our sha1sum into a digest string
+      char digest[SHA_DIGEST_LENGTH*2 + 1]; // XXX extra 1 byte is essential, otherwise overflow (into i)
+      for (int i=0; i < SHA_DIGEST_LENGTH; i++) {
+          //printf("Copy from hash [%d] (size is %lu) to digest[%d] (size is %lu)\n", i, sizeof(hash), i*2, sizeof(digest));
+          sprintf((char*)&(digest[i*2]), "%02x", hash[i]);
+      }
+
+      // Check if this is a known file, if so does the hash match?
+      for (int i = 0; i < known_files.size(); i++) {
+        if (strcmp(path, known_files[i]) == 0) {
+          if (strcmp(digest, known_hashes[i]) != 0) {
+            printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not expected %s\n", path, digest, known_hashes[i]);
+            goto hash_mismatch;
+          } else {
+            //printf("[Attest] Executing %s with good sha1sum of %s\n", path, digest);
           }
         }
       }
     }
+  }
 
+close_fd:
+  if (!fail) {
     yield_syscall(details, close, guest_fd);
   }
 
@@ -110,14 +115,14 @@ hash_mismatch:
   details->orig_syscall->retval = -ENOEXEC;
 
   co_yield *(details->orig_syscall);
-  co_return 1;
+  co_return ExitStatus::SUCCESS; // Blocked guest exec, but that's no failure
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
                              long unsigned int pc, unsigned int asid) {
   // We inject syscalls starting at every execve
   if (callno == __NR_execve)
-    return &start_coopter;
+    return &pre_execve;
   return NULL;
 }
 
