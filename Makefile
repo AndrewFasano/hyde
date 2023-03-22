@@ -8,7 +8,7 @@ SO_CFLAGS=-fPIC -shared $(CFLAGS)
 LDFLAGS=
 
 
-SRCS = $(wildcard caps/*.cpp)
+SRCS = $(wildcard progs/*.cpp)
 PROGS = $(patsubst %.cpp,%.so,$(SRCS))
 
 HYDE = $(wildcard hyde/*.cpp)
@@ -23,15 +23,15 @@ $(HYDE_O): $(HYDE)
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 # Pwreset needs link with crypt
-caps/pwreset.so: caps/pwreset.cpp  $(HYDE_O)
+progs/pwreset.so: progs/pwreset.cpp  $(HYDE_O)
 	$(CXX) $(SO_CFLAGS) $< $(LDFLAGS) $(HYDE_O) -lcrypt -o $@
 
 # Hyperptrace needs link with pthread
-caps/hyperptrace.so: caps/hyperptrace.cpp $(HYDE_O)
+progs/hyperptrace.so: progs/hyperptrace.cpp $(HYDE_O)
 	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -lpthread -o $@
 
 # Normal programs
-caps/%.so : caps/%.cpp $(HYDE_O)
+progs/%.so : progs/%.cpp $(HYDE_O)
 	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -o $@
 
 clean:
