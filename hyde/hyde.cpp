@@ -8,7 +8,7 @@
 /*
  * Copy size bytes from a guest virtual address into a host buffer.
  */
-SyscCoro ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size) {
+SyscCoroHelper ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size) {
   // We wish to read size bytes from the guest virtual address space
   // and store them in the buffer pointed to by out. If out is NULL,
   // we allocate it
@@ -34,7 +34,7 @@ SyscCoro ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size) {
 /* Memread will copy guest data to a host buffer, paging in memory as needed.
  * It's an alias for ga_memcpy but that might go away later in favor of this name.
  */
-SyscCoro ga_memread(asid_details* r, void* out, uint64_t gva_base, size_t size) {
+SyscCoroHelper ga_memread(asid_details* r, void* out, uint64_t gva_base, size_t size) {
   co_return yield_from(ga_memcpy, r, out, gva_base, size);
 }
 
@@ -43,7 +43,7 @@ SyscCoro ga_memread(asid_details* r, void* out, uint64_t gva_base, size_t size) 
  * translation requests as necessary, guaranteed to work so long as address through
  * address + size are mappable
  */
-SyscCoro ga_memcpy(asid_details* r, void* out, uint64_t gva_base, size_t size) {
+SyscCoroHelper ga_memcpy(asid_details* r, void* out, uint64_t gva_base, size_t size) {
 
   uint64_t gva_end = (uint64_t)((uint64_t)gva_base + size);
   uint64_t gva_start_page = (uint64_t)gva_base  & ~(PAGE_SIZE - 1);
@@ -125,16 +125,20 @@ SyscCoro ga_memcpy(asid_details* r, void* out, uint64_t gva_base, size_t size) {
 
 /* Given a host buffer, write it to a guest virtual address. The opposite
  * of ga_memcpy */
-SyscCoro ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size) {
+SyscCoroHelper ga_memwrite(asid_details* r, uint64_t _gva, void* in, size_t size) {
   // TODO: re-issue translation requests as necessary
   uint64_t hva;
+  __u64 gva = 0;
+  gva += (__u64)_gva;
   assert(size != 0);
 
   if (!translate_gva(r, gva, &hva)) {
-      //yield_syscall(r, __NR_access, (__u64)gva, 0);
-      yield_syscall_raw(r, access, (uint64_t)gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
+      int rv = yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
       if (!translate_gva(r, gva, &hva)) {
-        co_return -1; // Failure, even after retry
+        yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
+        if (!translate_gva(r, gva, &hva)) {
+          co_return -1; // Failure, even after double retry
+        }
       }
   }
 
@@ -143,7 +147,7 @@ SyscCoro ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size) {
   co_return 0;
 }
 
-SyscCoro ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_size) {
+SyscCoroHelper ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_size) {
   // Set host to a host virtual address that maps to the guest virtual address gva
 
   // TODO: Assert that gva+0 and gva+min_size can both be reached

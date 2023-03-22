@@ -17,12 +17,12 @@
 
 #include "hyde_common.h"
 
-/* Yield_from runs a coroutine, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
+/* Yield_from runs a HydeCoro<hsyscall, uint>, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
 #define yield_from(f, ...) \
   ({ \
     auto h = f(__VA_ARGS__).h_; \
     auto &promise = h.promise(); \
-    uint64_t rv = 0; \
+    int rv = 0; \
     while (!h.done()) { \
         co_yield promise.value_; \
         h(); /* Advance the other coroutine  */ \
@@ -33,11 +33,11 @@
   })
 
 // Coroutine helpers - HyDE programs can yield_from these and the helpers can inject more syscalls if they'd like
-SyscCoro ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoro ga_memcpy(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoro ga_memread(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoro ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size);
-SyscCoro ga_map(asid_details* r, uint64_t gva, void** host, size_t min_size);
+SyscCoroHelper ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memcpy(asid_details* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memread(asid_details* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size);
+SyscCoroHelper ga_map(asid_details* r, uint64_t gva, void** host, size_t min_size);
 
 // Series of templates to deduce the size of a variadic list of arguments
 // This is used by yield_syscall so we can calculate the necessary stack size in guest
@@ -126,12 +126,13 @@ void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
     pending->args[idx].is_ptr = true;
     pending->args[idx].guest_ptr = *stack_addr;
     pending->args[idx].size = this_size;
+    //printf("Allocation for arg %d: stack (GVA) %lx, size %u\n", idx, pending->args[idx].guest_ptr, pending->args[idx].size);
     *stack_addr += padded_size; // Shift stack address
   }
 } 
 
 template <typename... Args>
-SyscCoro map_args_to_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
+SyscCoroHelper map_args_to_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
   // Given a tuple of arguments with types and sizes, map those arguments, with concrete
   // pointer values stored in pending->args to the guest stack
 
@@ -148,15 +149,20 @@ SyscCoro map_args_to_guest_stack(asid_details* details, uint64_t stack_addr, hsy
   // Now look through pending->args and actually do the memory mappings
   for (int i = 0; i < pending->nargs; i++) {
     if (pending->args[i].is_ptr) {
-      //printf("map host %lx to guest %lx, size %d\n", pending->args[i].value, pending->args[i].guest_ptr, pending->args[i].size);
-      yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size); // XXX we want this, just need kvm
+      if (yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size) != 0) {
+        printf("FATAL: failed to memwrite argument %d into guest stack\n", i);
+        co_return -1;
+      }
+
+      // If we want to debug, can't use yield_syscall macro - need to do something like:
+      //co_yield unchecked_build_syscall<SYS_write>(write, 0, 1, pending->args[i].guest_ptr, pending->args[i].size);
     }
   }
   co_return 0;
 }
 
 template <typename... Args>
-SyscCoro map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *sc, Args&&... args) {
+SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *sc, Args&&... args) {
   // We just ran syscall sc, iterate through it's arguments, identifying poitners and yield syscalls to map them back
 
   for (int i = 0; i < sc->nargs; i++) {
@@ -172,6 +178,13 @@ SyscCoro map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, h
 // TODO: can we replace these with direct calls or do we need the wrapper?:2w
 #define get_arg_types_sizes(...) deduce_types_and_sizes(__VA_ARGS__);
 #define calculate_size(_argTuple) accumulate_stack_sizes(_argTuple);
+
+/* No arguments */
+#define yield_syscall0(details, func) ({                                 \
+  co_yield build_syscall<SYS_##func>(::func, 0); \
+  details->last_sc_retval;                                              \
+})
+
 
 /* Helper macro to be used by SyscCoro coroutines. Build an hsyscall using the given function name,
  * yield that hsyscall (which will cause the details object to update place a return in last_sc_ret),
@@ -195,7 +208,7 @@ SyscCoro map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, h
     yield_from(map_args_to_guest_stack, details, guest_stack, &s, arg_types_tup);                                      \
   }                                                                                                           \
   co_yield s;                                                                                                 \
-  int rv = details->last_sc_retval;                                                                           \
+  auto rv = details->last_sc_retval;                                                                           \
   if (total_size > 0)                                                                                         \
   { /* We previously allocated some stack space for this syscall, sync it back, then free it */               \
     yield_from(map_args_from_guest_stack, details, guest_stack, &s, arg_types_tup);                                    \
