@@ -7,7 +7,7 @@
 #include "hyde.h"
 
 
-SyscCoro start_coopter(asid_details* details) {
+SyscCoro pre_exec(asid_details* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
 
@@ -40,7 +40,7 @@ SyscCoro start_coopter(asid_details* details) {
     // Read out the guest pointer to the next env var
     if (yield_from(ga_memread, details, &envp, (uint64_t)&guest_envp[i], sizeof(envp)) == -1) {
       printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
-      co_return -1;
+      co_return ExitStatus::SINGLE_FAILURE;
     }
     if (envp == 0) break;
 
@@ -77,7 +77,7 @@ SyscCoro start_coopter(asid_details* details) {
 
   if ((int64_t)guest_buf <= 0 && (int64_t)guest_buf > -0x1000) {
     printf("[EnvMgr] ERROR allocating scratch buffer got: %lu\n", (int64_t) guest_buf);
-    co_return -1;
+    co_return ExitStatus::SINGLE_FAILURE;
   }
 
   // Save start of guest buffer
@@ -124,7 +124,7 @@ SyscCoro start_coopter(asid_details* details) {
 
   // Inject the modified syscall, then be done
   co_yield *(details->orig_syscall); // noreturn
-  co_return 0;
+  co_return ExitStatus::SUCCESS;
 
 
 cleanup_buf: // We have failed after allocating memory, clean it up
@@ -132,13 +132,13 @@ cleanup_buf: // We have failed after allocating memory, clean it up
   yield_syscall(details, munmap, injected_arg, 1024);
 
   co_yield *(details->orig_syscall); // noreturn
-  co_return -1;
+  co_return ExitStatus::SINGLE_FAILURE;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
                              long unsigned int pc, unsigned int asid) {
   // We inject syscalls starting at every execve
   if (callno == SYS_execve)
-    return &start_coopter;
+    return &pre_exec;
   return NULL;
 }
