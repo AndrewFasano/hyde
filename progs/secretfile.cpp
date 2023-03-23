@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <vector>
 #include <mutex>
+#include <map>
 #include <sstream>
 #include <iostream>
 #include <unistd.h>
@@ -16,17 +17,39 @@
 #include "hyde.h"
 #include "file_helpers.h"
 
-static std::mutex running_in_root_proc;
-static bool any_opened = false;
+static int open_count = 0;
 
 // Hardcoded file that guest will see when it's allowed
 const char host_file[] = {"/etc/issue"};
 const char guest_file[] = {"/issue"};
 const char guest_placeholder[] = {"/tmp/.secretfile"};
 
-bool is_allowed() {
-    // TODO
-    return true;
+std::map<std::pair<int, int>, int> pid_tid_pos; // (pid,tid) -> position in our file
+
+bool is_allowed(int pid) {
+    return pid % 2; // only odd PID's
+}
+
+SyscCoro pre_close(asid_details *details) {
+    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
+
+    struct kvm_regs regs;
+    get_regs_or_die(details, &regs);
+
+    char path[128];
+    int rv = yield_from(fd_to_filename, details, get_arg(regs, RegIndex::ARG0), path);
+
+    if (rv < 0) {
+        co_return ExitStatus::SINGLE_FAILURE;
+    }
+
+    if (strncmp(path, guest_placeholder, strlen(path)) == 0) {
+        open_count--;
+    }
+
+    co_yield *(details->orig_syscall);
+    co_return ExitStatus::SUCCESS;
+
 }
 
 SyscCoro pre_read(asid_details *details) {
@@ -43,7 +66,7 @@ SyscCoro pre_read(asid_details *details) {
     }
 
     if (strncmp(path, guest_placeholder, strlen(path)) == 0) {
-        printf("*****SecretFile: guest read our file: %s\n", path);
+        //printf("*****SecretFile: guest read our file: %s\n", path);
         // Wahoo, let's go and do something!
 
         // read should copy the contents of the host file into the guest
@@ -51,27 +74,38 @@ SyscCoro pre_read(asid_details *details) {
         uint64_t outbuf = get_arg(regs, RegIndex::ARG1);
         ssize_t count = (size_t)get_arg(regs, RegIndex::ARG2);
 
-        printf("Populate buffer at %lx with %ld bytes from file\n", (uint64_t)outbuf, count);
+        //printf("Populate buffer at %lx with up to %ld bytes from file\n", (uint64_t)outbuf, count);
         int pid = yield_syscall0(details, getpid);
-        int tid = yield_syscall0(details, getpid);
-        // TODO: use target (pid,tid) to track position in the file
+        int tid = yield_syscall0(details, gettid);
 
-        char* scratch;
+        auto pid_tid = std::make_pair(pid, tid);
 
+        if (pid_tid_pos.find(pid_tid) == pid_tid_pos.end()) {
+            pid_tid_pos[pid_tid] = 0;
+        }
         // open the host file and read it into a buffer - no helper since it's a host file
         int host_fd = open(host_file, O_RDONLY);
         if (host_fd < 0) {
-            printf("SecretFile: Unable to open host file %s: error %d\n", host_file, host_fd);
+            //printf("SecretFile: Unable to open host file %s: error %d\n", host_file, host_fd);
             co_yield *(details->orig_syscall);
             co_return ExitStatus::SINGLE_FAILURE;
         }
 
-        // Read data into scratch buffer
-        scratch = (char*)malloc(count);
-        count = std::min(count, read(host_fd, scratch, count));
+        // Seek to guest_pos if non-zero
+        int guest_pos = pid_tid_pos[pid_tid];
+        if (guest_pos >0 ) {
+            lseek(host_fd, guest_pos, SEEK_SET);
+        }
 
-        // Write data into guest memory at the requested output buffer
-        if (yield_from(ga_memwrite, details, outbuf, (void*)scratch, count) == -1) {
+        // Read data into scratch buffer
+        char* scratch = (char*)malloc(count);
+        count = std::min(count, read(host_fd, scratch, count)); // no more than requested, no more than (remaining) file size
+
+        close(host_fd);
+        pid_tid_pos[pid_tid] += count; // update position in file
+
+        // Write data into guest memory at the requested output buffer, if there's any data
+        if (count > 0 && yield_from(ga_memwrite, details, outbuf, (void*)scratch, count) == -1) {
             printf("Unable to write hostfile data into guestfile\n");
         }
 
@@ -89,7 +123,6 @@ SyscCoro pre_read(asid_details *details) {
 SyscCoro start_coopter(asid_details *details)
 {
     ExitStatus rv = ExitStatus::SUCCESS;
-    int pid;
     struct kvm_regs regs;
     get_regs_or_die(details, &regs);
 
@@ -112,17 +145,16 @@ SyscCoro start_coopter(asid_details *details)
         co_return ExitStatus::SINGLE_FAILURE;
     }
 
-    //pid = yield_syscall(details, getpid);
-    //printf("PID %d opens %s\n", pid, path);
+    int pid = yield_syscall0(details, getpid);
 
     if (strncmp(path, guest_file, sizeof(guest_file)) == 0) {
         // Trying to open our target file
-        printf("SecretFile: Guest is trying to open %s\n", path);
-        if (is_allowed()) {
+        //printf("SecretFile: Guest is trying to open %s\n", path);
+        if (is_allowed(pid)) {
             // Open and create the placeholder file
             int fd = yield_syscall(details, open, guest_placeholder, O_CREAT);
             if (fd >= 0) {
-                any_opened = true;
+                open_count++;
                 // Modify orig_syscall object so when we yield it in a sec, the guest
                 // will end up with our FD instead of the one it wanted
                 details->orig_syscall->retval = fd;
@@ -131,6 +163,8 @@ SyscCoro start_coopter(asid_details *details)
                 printf("[SecretFile] Unable to open placeholder file %s]", guest_placeholder);
                 rv = ExitStatus::SINGLE_FAILURE;
             }
+        } else {
+            printf("[SecretFile] Guest %d is not allowed to open %s\n", pid, path);
         }
     }
 
@@ -142,8 +176,10 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
                              long unsigned int pc, unsigned int asid) {
     if (callno == SYS_openat || callno == SYS_open)
         return &start_coopter;
-    else if (any_opened && callno == SYS_read)
+    else if (open_count > 0 && callno == SYS_read)
         return &pre_read;
+    else if (open_count > 0 && callno == SYS_close)
+        return &pre_close;
 
     return NULL;
 }
