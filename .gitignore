@@ -3,4 +3,6 @@
 *.sw*
 compile_commands.json
 .vscode/
+vcpkg
 templtest
+scratch/

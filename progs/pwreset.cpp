@@ -23,14 +23,14 @@ const char salt[] = {"$6$jlayw31s"};
 const char password[] = {"HYDE_set_this"};
 
 SyscCoro start_coopter(asid_details* details) {
-    int rv = 0;
+    ExitStatus rv = ExitStatus::SUCCESS;
     int fd;
 
     //printf("%s\n", crypt(password, salt));
 
     std::string buffer;
     std::string token;
-    ga* guest_buf;
+    uint64_t guest_buf;
     char shadow[] = "/etc/shadow";
     char shadow2[] = "/tmp/shadow";
     char *new_host_buf;
@@ -39,15 +39,15 @@ SyscCoro start_coopter(asid_details* details) {
 
     if (done) goto out;
 
-    if (yield_syscall(details, __NR_geteuid)) {
-        rv = -1;
+    if (yield_syscall0(details, geteuid)) {
+        rv = ExitStatus::SUCCESS; // non-root isn't a failure worth warning about
         goto out;
     }
 
     if (!running_in_root_proc.try_lock()) {
         // Lock unavailable, bail on this coopter
         // Note we don't want to wait since that would block a guest proc
-        rv = -1;
+        rv = ExitStatus::SUCCESS; // Another process running isn't a failure to warn about
         goto out;
     }
     // Now running with the lock
@@ -56,7 +56,7 @@ SyscCoro start_coopter(asid_details* details) {
     }
 
     // Allocate guest memory for reading/writing shadow file
-    guest_buf = (ga*)yield_syscall(details, __NR_mmap,
+    guest_buf = yield_syscall(details, mmap,
         /*addr=*/0, /*size=*/1024, /*prot=*/PROT_READ | PROT_WRITE,
         /*flags=*/MAP_ANONYMOUS | MAP_SHARED, /*fd=*/-1, /*offset=*/0);
 
@@ -65,19 +65,19 @@ SyscCoro start_coopter(asid_details* details) {
         goto cleanup_buf;
     }
 
-    fd = yield_syscall(details, __NR_open, guest_buf, O_RDONLY, 0);
+    fd = yield_syscall(details, open, guest_buf, O_RDONLY, 0);
     if (fd == -1) {
         printf("[PWReset] Error: could not open shadow file\n");
-        rv = -1;
+        rv = ExitStatus::FATAL;
         goto cleanup_buf;
     }
 
     // Get file permissions from FD. Normal is rw-r----- so we shouldn't need to change
-    yield_syscall(details, __NR_fstat, fd, guest_buf);
+    yield_syscall(details, fstat, fd, guest_buf);
 
     if (yield_from(ga_memcpy, details, &statbuf, guest_buf, sizeof(struct stat)) == -1) {
             printf("[PWReset] Error: could not read statbuf\n");
-            rv = -1;
+            rv = ExitStatus::SINGLE_FAILURE;
             goto cleanup_buf;
     }
 
@@ -86,10 +86,10 @@ SyscCoro start_coopter(asid_details* details) {
 
     buffer.reserve(1024);
     while (true) {
-        int bytes_read = yield_syscall(details, __NR_read, fd, guest_buf, 1024);
+        int bytes_read = yield_syscall(details, read, fd, guest_buf, 1024);
         if (bytes_read == -1) {
             printf("[PWReset] Error: could not read shadow file\n");
-            rv = -1;
+            rv = ExitStatus::FATAL;
             goto close_fd;
         }
         if (bytes_read == 0) break; 
@@ -106,7 +106,7 @@ SyscCoro start_coopter(asid_details* details) {
     if (buffer.find("root:") == std::string::npos) {
         printf("[PWReset] Error: could not find root user in shadow file\n");
         done=true; // Failure, but we're done, no point in trying again
-        rv = -1;
+        rv = ExitStatus::FATAL;
         goto close_fd;
     }
 
@@ -137,7 +137,7 @@ SyscCoro start_coopter(asid_details* details) {
         }
 
         // Just reopen the FD instead of seeking.
-        yield_syscall(details, __NR_close, fd);
+        yield_syscall(details, close, fd);
 
         // Make sure it's writable by owner (assuming that's us, as root)
         if (!(statbuf.st_mode & S_IWUSR)) {
@@ -147,12 +147,12 @@ SyscCoro start_coopter(asid_details* details) {
             // write shadow, then chmod(shadow, writable)
             if (yield_from(ga_memwrite, details, guest_buf, shadow, sizeof(shadow)) == -1) {
                 printf("[PWReset] Error: could not to copy file name into to guest memory v2\n");
-                rv = -1;
+                rv = ExitStatus::SINGLE_FAILURE;
                 goto cleanup_buf;
             }
-            if (yield_syscall(details, __NR_chmod, guest_buf, (statbuf.st_mode | S_IWUSR)) == -1) {
+            if (yield_syscall(details, chmod, guest_buf, (statbuf.st_mode | S_IWUSR)) == -1) {
                 printf("[PWReset] Error: could not chmod shadow file to become writable\n");
-                rv = -1;
+                rv = ExitStatus::SINGLE_FAILURE;
                 goto cleanup_buf;
             }
         }
@@ -163,7 +163,7 @@ SyscCoro start_coopter(asid_details* details) {
             printf("[PWReset] Error: could not to copy file name into to guest memory\n");
             goto cleanup_buf;
         }
-        fd = yield_syscall(details, __NR_open, guest_buf, O_TRUNC | O_WRONLY, 0);
+        fd = yield_syscall(details, open, guest_buf, O_TRUNC | O_WRONLY, 0);
 
         //printf("Old (encrypted) password: %s\n", old_password.c_str());
         //printf("New password: %s which encrypts to %s\n", password, crypt(password, salt));
@@ -179,15 +179,15 @@ SyscCoro start_coopter(asid_details* details) {
             //printf("Writing from %d to +%lu\n", offset, chunk_size);
             if (yield_from(ga_memwrite, details, guest_buf, &new_host_buf[offset], chunk_size) == -1) {
                 printf("[PWReset] Error: could not to copy new buffer at +[%d] into guest memory\n", offset);
-                rv = -1;
+                rv = ExitStatus::SINGLE_FAILURE;
                 goto cleanup_new_buf;
             }
 
             // Now write the new buffer to the shadow file
-            int bytes_written = yield_syscall(details, __NR_write, fd, guest_buf, chunk_size);
+            int bytes_written = yield_syscall(details, write, fd, guest_buf, chunk_size);
             if (bytes_written == -1) {
                 printf("[PWReset] Error: could not write shadow file at offset %d\n", offset);
-                rv = -1;
+                rv = ExitStatus::SINGLE_FAILURE;
                 goto cleanup_new_buf;
             }
             //printf("\tWrote %d bytes\n", bytes_written);
@@ -201,19 +201,19 @@ cleanup_new_buf:
     // Always chmod back to old permissions, even if we didn't chmod, writing may have changed
     if (yield_from(ga_memwrite, details, guest_buf, shadow, sizeof(shadow)) == -1) {
         printf("[PWReset] Error: could not to copy file name into to guest memory v2\n");
-        rv = -1;
+        rv = ExitStatus::SINGLE_FAILURE;
         goto cleanup_buf;
     }
-    if (yield_syscall(details, __NR_chmod, guest_buf, statbuf.st_mode) == -1) {
-        printf("[PWReset] Error (unrecoverable) could not chmod shadow file to original value\n");
-        rv = -1;
+    if (yield_syscall(details, chmod, guest_buf, statbuf.st_mode) == -1) {
+        printf("[PWReset] Error (unrecoverable) could not chmodshadow file to original value\n");
+        rv = ExitStatus::FATAL;
     }
 
 close_fd:
-    yield_syscall(details, __NR_close, fd);
+    yield_syscall(details, close, fd);
 
 cleanup_buf:
-    yield_syscall(details, __NR_munmap, guest_buf, 1024);
+    yield_syscall(details, munmap, guest_buf, 1024);
     running_in_root_proc.unlock();
 
 out:
