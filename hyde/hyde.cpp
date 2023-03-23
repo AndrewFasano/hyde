@@ -153,21 +153,17 @@ SyscCoroHelper ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_si
   // TODO: Assert that gva+0 and gva+min_size can both be reached
   //at host[0], and host[min_size] after mapping. If not, fail?
   // TODO how to handle failures here?
-  __u64 _gva = (uint64_t)gva & (uint64_t)-1;
 
-  struct kvm_translation trans = { .linear_address = _gva };
-  assert(kvm_vcpu_ioctl_ext(r->cpu, KVM_TRANSLATE, &trans) == 0);
+  uint64_t gpa = kvm_translate(r->cpu, gva); // Guest physical addr
 
-  // Translation failed on base address - not in our TLB, maybe paged out
-  if (trans.physical_address == (unsigned long)-1) {
-      yield_syscall_raw(r, access, _gva, 0);
-
-      // Now retry. if we fail again, bail
-      //printf("Retrying to read %llx\n", trans.linear_address);
-      assert(kvm_vcpu_ioctl_ext(r->cpu, KVM_TRANSLATE, &trans) == 0);
-      //printf("\t result: %llx\n", trans.physical_address);
-      if (trans.physical_address == (unsigned long)-1) {
-        printf("Oh no we double fail mapping %llx\n", _gva);
+  if (gpa == -1) {
+    // Translation failed on base address - not in our TLB, maybe paged out
+      // Inject access syscall, forcing guest kernel to page it in with no other side effects
+      yield_syscall_raw(r, access, gva, 0);
+      // Now retry
+      gpa = kvm_translate(r->cpu, gva);
+      if (gpa == -1) {
+        printf("ga_map double fails for %lx\n", gva);
         co_return -1; // Failure!
       }
   }
@@ -175,7 +171,7 @@ SyscCoroHelper ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_si
   // Translation has succeeded, we have the guest physical address
   // Now translate that to the host virtual address
   uint64_t hva;
-  assert(kvm_host_addr_from_physical_memory_ext(trans.physical_address, &hva) == 1);
+  assert(kvm_host_addr_from_physical_memory_ext(gpa, &hva) == 1);
   (*host) = (void*)hva;
 
   co_return 0;
