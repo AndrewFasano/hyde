@@ -59,7 +59,7 @@ SyscCoro pre_execve(asid_details* details) {
 
     int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
     if (bytes_read < 0) {
-      printf("[Attest] Reading file failed with errno: %d\", bytes_read");
+      printf("[Attest] Reading file failed with errno: %d\n", bytes_read);
       rv = ExitStatus::SINGLE_FAILURE;
       goto close_fd;
     }
