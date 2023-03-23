@@ -16,6 +16,7 @@
 #include <coroutine>
 
 #include "hyde_common.h"
+#include "static_args.h" // For accumulate_stack_sizes template class magic
 
 /* Yield_from runs a HydeCoro<hsyscall, uint>, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
 #define yield_from(f, ...) \
@@ -38,50 +39,6 @@ SyscCoroHelper ga_memcpy(asid_details* r, void* out, uint64_t gva, size_t size);
 SyscCoroHelper ga_memread(asid_details* r, void* out, uint64_t gva, size_t size);
 SyscCoroHelper ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size);
 SyscCoroHelper ga_map(asid_details* r, uint64_t gva, void** host, size_t min_size);
-
-// Series of templates to deduce the size of a variadic list of arguments
-// This is used by yield_syscall so we can calculate the necessary stack size in guest
-// memory that we will use for copying hsyscall arguments into the guest's memory
-
-// Handle non-array, non-pointer types
-template <typename T>
-auto deduce_type_and_size_impl(T&& arg, std::false_type, std::false_type) {
-    //return std::make_pair(&arg, sizeof(T));
-    return std::make_pair(&arg, 0); // XXX: Do *not* count the size of these types
-}
-
-// Handle pointer types
-template <typename T>
-auto deduce_type_and_size_impl(T* arg, std::false_type, std::true_type) {
-    return std::make_pair(arg, sizeof(std::remove_pointer_t<T>));
-}
-
-// Handle array types
-template <typename T, size_t N>
-auto deduce_type_and_size_impl(T (&arr)[N], std::true_type, std::false_type) {
-    return std::make_pair(arr, sizeof(T) * N);
-}
-
-template <typename T>
-auto deduce_type_and_size(T&& arg) {
-    return deduce_type_and_size_impl(std::forward<T>(arg), 
-                                     std::is_array<std::remove_reference_t<T>>{}, 
-                                     std::is_pointer<std::remove_reference_t<T>>{});
-}
-
-template <typename... Args>
-auto deduce_types_and_sizes(Args&&... args) {
-    return std::tuple_cat(std::make_tuple(deduce_type_and_size(std::forward<Args>(args)))...);
-}
-
-
-template <typename... Args>
-constexpr size_t accumulate_stack_sizes(std::tuple<Args...> tuple) {
-    size_t sum = 0;
-    // Round up to 32-bits - this matches how we actually allocate these things later
-    std::apply([&sum](auto... args) { (..., (sum += args.second ? (args.second + (32 - (args.second % 32))): 0 ) ); }, tuple); // Padding for non-zero sized elements
-    return sum;
-}
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
@@ -120,12 +77,13 @@ hsyscall build_syscall(Function syscall_func, uint64_t guest_stack, Args... args
 
 void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
   // Calculate how argument idx should be mapped to the guest stack. Update pending->args[idx] and stack_addr
-  uint64_t this_size = (uint64_t)args.second;
+  uint64_t this_size = (uint64_t)std::get<1>(args);
   if (this_size) {
     uint64_t padded_size = this_size + (32 - (this_size % 32)); // 32-bit aligned
     pending->args[idx].is_ptr = true;
     pending->args[idx].guest_ptr = *stack_addr;
     pending->args[idx].size = this_size;
+    pending->args[idx].copy_out = std::get<2>(args) ? false : true; // If it's a const, we don't copy out, otherwise we do
     //printf("Allocation for arg %d: stack (GVA) %lx, size %u\n", idx, pending->args[idx].guest_ptr, pending->args[idx].size);
     *stack_addr += padded_size; // Shift stack address
   }
@@ -166,18 +124,13 @@ SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_a
   // We just ran syscall sc, iterate through it's arguments, identifying poitners and yield syscalls to map them back
 
   for (int i = 0; i < sc->nargs; i++) {
-    if (sc->args[i].is_ptr) {
+    if (sc->args[i].is_ptr && sc->args[i].copy_out) {
       //printf("map guest %lx to host %lx, size %d\n", sc->args[i].guest_ptr, sc->args[i].value, sc->args[i].size);
       yield_from(ga_memread, details, (void*)sc->args[i].value, sc->args[i].guest_ptr, sc->args[i].size); // XXX we want this, just need kvm
     }
   }
   co_return 0;
 }
-
-/* Pair of macros to 1) get a mapping of {type, arg size} and 2) sum up the arg size values returned by the first */
-// TODO: can we replace these with direct calls or do we need the wrapper?:2w
-#define get_arg_types_sizes(...) deduce_types_and_sizes(__VA_ARGS__);
-#define calculate_size(_argTuple) accumulate_stack_sizes(_argTuple);
 
 /* No arguments */
 #define yield_syscall0(details, func) ({                                 \
@@ -192,8 +145,8 @@ SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_a
  * syscall which was set in details->last_sc_ret.
  */
 #define yield_syscall(details, func, ...) ({                                                                \
-  auto arg_types_tup = get_arg_types_sizes(__VA_ARGS__);                                                    \
-  size_t total_size = calculate_size(arg_types_tup);                                                        \
+  auto arg_types_tup = deduce_types_and_sizes(__VA_ARGS__);                                                    \
+  size_t total_size = accumulate_stack_sizes(arg_types_tup);                                                        \
   size_t padded_total_size = total_size + (1024 - (total_size % 1024));                                     \
   /*printf("Total stack size is %lu, padded to %lu\n", total_size, padded_total_size);*/                    \
   uint64_t guest_stack = 0;                                                                                 \

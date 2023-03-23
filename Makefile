@@ -19,6 +19,9 @@ all: $(PROGS)
 test: test.cpp
 	$(CXX) $(CFLAGS) $< -o $@
 
+templtest: templtest.cpp
+	$(CXX) $(CFLAGS) $< -o $@
+
 hyde/%.o: hyde/%.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
