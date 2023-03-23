@@ -3,9 +3,9 @@
 # I'm getting internal compiler errors now so let's give clang a shot!
 
 CXX=clang++-15
-CFLAGS=-g -I../qemu/accel/kvm/ -I./hyde/ -std=c++20
+CFLAGS=-g -I../qemu/accel/kvm/ -I./hyde/ -std=c++20 -Wno-deprecated-declarations
 SO_CFLAGS=-fPIC -shared $(CFLAGS)
-LDFLAGS=
+LDFLAGS=-fuse-ld=lld
 
 
 SRCS = $(wildcard progs/*.cpp)
@@ -19,7 +19,7 @@ all: $(PROGS)
 test: test.cpp
 	$(CXX) $(CFLAGS) $< -o $@
 
-$(HYDE_O): $(HYDE)
+hyde/%.o: hyde/%.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 # Pwreset needs link with crypt
@@ -30,9 +30,9 @@ progs/pwreset.so: progs/pwreset.cpp  $(HYDE_O)
 progs/hyperptrace.so: progs/hyperptrace.cpp $(HYDE_O)
 	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -lpthread -o $@
 
-# Normal programs
+# Normal programs just link against hyde
 progs/%.so : progs/%.cpp $(HYDE_O)
 	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -o $@
 
 clean:
-	rm -f $(PROGS) $(HYDE_P)
+	rm -f $(PROGS) $(HYDE_O)

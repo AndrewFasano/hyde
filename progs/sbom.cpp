@@ -8,16 +8,18 @@
 #include <fcntl.h>     // O_RDONLY
 #include <vector>
 #include <map>
-#include "hyde.h"
 #include <openssl/sha.h>
+
+#include "hyde.h"
+#include "file_helpers.h"
 
 #define BUF_SZ 1024 // Size to use for read chunks
 #define PATH_LENGTH 256 // Max size of paths
 #define INTERNAL_ERROR -99999
 
-SyscCoroHelper hash_file(asid_details *details, char* path, unsigned char *outbuf) {
-  // Hash a file at the specified pointer. write ascii digest into outbuf which should
-  // have of size SHA_DIGEST_LENGTH*2+1. Path should not be longer than PATH_LENGTH.
+template <std::size_t N>
+SyscCoroHelper hash_file(asid_details *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
+  // Hash a file at the specified pointer. write ascii digest into outbuf
   int rv = 0;
   std::string buffer;
   int guest_fd;
@@ -34,8 +36,7 @@ SyscCoroHelper hash_file(asid_details *details, char* path, unsigned char *outbu
     co_return INTERNAL_ERROR; // Internal error, not a guest syscall error
   }
 
-  assert(strlen(path) < PATH_LENGTH);
-  char path_buf[128];
+  char path_buf[N];
   memcpy(path_buf, path, strlen(path)+1);
 
   // Open target binary for reading
@@ -76,25 +77,6 @@ SyscCoroHelper hash_file(asid_details *details, char* path, unsigned char *outbu
   co_return rv;
 }
 
-SyscCoroHelper fd_to_filename(asid_details* details, int fd, char* outbuf) {
-  int rv = 0;
-  int readlink_rv;
-
-  // Write /proc/self/fd/<fd> into guest memory
-  char fd_path[128];
-  char local_outbuf[128] = {0};
-  snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
-
-  // Use readlink to read /proc/self/fd/<fd>
-  readlink_rv = yield_syscall(details, readlink, fd_path, local_outbuf, 128);
-
-  if (readlink_rv < 0) {
-      printf("[SBOM] readlink fails\n");
-  }
-  strncpy(outbuf, local_outbuf, readlink_rv);
-  co_return readlink_rv;
-}
-
 SyscCoro pre_execve_at(asid_details* details) {
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
@@ -120,7 +102,7 @@ SyscCoro pre_execve_at(asid_details* details) {
 
   } else {
     char dir_path[PATH_LENGTH];
-    int fd_status = yield_from(fd_to_filename, details, fd, (char*)dir_path);
+    int fd_status = yield_from(fd_to_filename, details, fd, dir_path);
     if (fd_status < 0) {
       printf("[SBOM] Unable to get filename for fd %d\n", rv);
       rv = ExitStatus::SINGLE_FAILURE;
@@ -131,7 +113,7 @@ SyscCoro pre_execve_at(asid_details* details) {
   }
 
   unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1];
-  hash_result = yield_from(hash_file, details, full_path, (unsigned char*)hashbuf);
+  hash_result = yield_from(hash_file, details, full_path, hashbuf);
 
   if (hash_result == INTERNAL_ERROR) {
     // We failed
@@ -162,8 +144,8 @@ SyscCoro pre_execve(asid_details* details) {
       rv = ExitStatus::SINGLE_FAILURE;
   } else {
     //printf("Exec filename; %s\n", path);
-    unsigned char hashbuf[SHA_DIGEST_LENGTH*2] = {0};
-    int hash_result = yield_from(hash_file, details, path, (unsigned char*)hashbuf);
+    unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
+    int hash_result = yield_from(hash_file, details, path, hashbuf);
     if (hash_result == INTERNAL_ERROR) {
       // We failed
       printf("[SBOM] Unable to hash file %s\n", path);
@@ -191,13 +173,13 @@ SyscCoro pre_mmap(asid_details* details) {
   int fd = (int)get_arg(regs, RegIndex::ARG4); 
 
   if (!(flags & MAP_ANONYMOUS)) {
-    if (yield_from(fd_to_filename, details, fd, (char*)lib_path) == -1) {
+    if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
       printf("[SBOM] Unable to get filename for fd %d\n", fd);
       rv = ExitStatus::SINGLE_FAILURE;
     } else {
       // Successfully got filename, let's use it!
-      unsigned char hashbuf[SHA_DIGEST_LENGTH*2] = {0};
-      int hash_result = yield_from(hash_file, details, lib_path, (unsigned char*)hashbuf);
+      unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
+      int hash_result = yield_from(hash_file, details, lib_path, hashbuf);
       if (hash_result == INTERNAL_ERROR) {
         // We failed
         printf("[SBOM] Unable to hash mapped file %s\n", lib_path);
