@@ -14,9 +14,9 @@
 #include "file_helpers.h"
 
 #define BUF_SZ 1024 // Size to use for read chunks
-#define PATH_LENGTH 256 // Max size of paths
 #define INTERNAL_ERROR -99999
 
+// Duplicated in attest.cpp
 template <std::size_t N>
 SyscCoroHelper hash_file(asid_details *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
   // Hash a file at the specified pointer. write ascii digest into outbuf
@@ -63,7 +63,7 @@ SyscCoroHelper hash_file(asid_details *details, char(&path)[N], unsigned char (&
     unsigned char hash[SHA_DIGEST_LENGTH];
     if (!SHA1_Final(hash, &context)) {
       printf("[Attest] Unable to finalize sha context\n");
-      rv = -1; // Still need to close
+      rv = INTERNAL_ERROR; // Still need to close
     } else {
       // Turn our sha1sum into a digest string
       int i = 0;
@@ -89,7 +89,7 @@ SyscCoro pre_execve_at(asid_details* details) {
 
   // Read pathname from arg 1
   char path[256];
-  if (yield_from(ga_memcpy, details, path, get_arg(regs, RegIndex::ARG1), sizeof(path)) == -1) {
+  if (yield_from(ga_memread, details, path, get_arg(regs, RegIndex::ARG1), sizeof(path)) == -1) {
       printf("[SBOM] Unable to read filename\n");
       rv = ExitStatus::SINGLE_FAILURE;
       goto out;

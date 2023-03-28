@@ -1,5 +1,7 @@
 #ifndef FILE_HELPERS_H
 #define FILE_HELPERS_H
+// for O_RDONLY
+#include <fcntl.h>
 
 #include "hyde.h"
 #define PATH_LENGTH 256
