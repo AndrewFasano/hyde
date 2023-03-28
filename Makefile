@@ -16,6 +16,12 @@ HYDE_O = $(patsubst %.cpp,%.o,$(HYDE))
 
 all: $(PROGS)
 
+progs/gdbserver.o: progs/gdbserver.cpp
+	$(CXX) $(CFLAGS) -c $< -o $@
+
+progs/gptgdbserver: progs/gptgdbserver.cpp progs/gdbserver.o progs/gdbserver.h
+	$(CXX) $(CFLAGS) $< progs/gdbserver.o -o $@
+
 test: test.cpp
 	$(CXX) $(CFLAGS) $< -o $@
 
