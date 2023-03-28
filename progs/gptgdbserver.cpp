@@ -142,29 +142,85 @@ GdbResponse handle_ptrace_command(pid_t debugee_pid, const GdbCommand& command) 
             break;
 
         case 'M': // Write memory
-            {
-                unsigned long long address = std::stoull(command.args[0], nullptr, 16);
-                unsigned long long length = std::stoull(command.args[1], nullptr, 16);
-                std::string payload = command.args[2];
-                // Implement the handling of the 'M' command using PTRACE API
+        {
+            unsigned long long address = std::stoull(command.args[0], nullptr, 16);
+            unsigned long long length = std::stoull(command.args[1], nullptr, 16);
+            std::string payload = command.args[2];
+
+            std::vector<unsigned char> data;
+            for (size_t i = 0; i < payload.length(); i += 2) {
+                data.push_back(static_cast<unsigned char>(std::stoul(payload.substr(i, 2), nullptr, 16)));
             }
-            break;
+
+            for (size_t i = 0; i < length; i += sizeof(long)) {
+                long word = 0;
+                memcpy(&word, &data[i], std::min(sizeof(long), (size_t)length - i));
+                if (ptrace(PTRACE_POKEDATA, debugee_pid, reinterpret_cast<void *>(address + i), reinterpret_cast<void *>(word)) == -1) {
+                    response = GdbResponse("E01");
+                    break;
+                }
+            }
+
+            response = GdbResponse("OK");
+        }
+        break;
 
         case 'X': // Write memory (binary format)
-            {
-                unsigned long long address = std::stoull(command.args[0], nullptr, 16);
-                unsigned long long length = std::stoull(command.args[1], nullptr, 16);
-                std::string payload = command.args[2];
-                // Implement the handling of the 'X' command using PTRACE API
+        {
+            unsigned long long address = std::stoull(command.args[0], nullptr, 16);
+            unsigned long long length = std::stoull(command.args[1], nullptr, 16);
+            std::string payload = command.args[2];
+
+            std::vector<unsigned char> data;
+            data.reserve(payload.size());
+            for (size_t i = 0; i < payload.size(); ++i) {
+                if (payload[i] == 0x7d) { // escape character
+                    ++i;
+                    data.push_back(payload[i] ^ 0x20);
+                } else {
+                    data.push_back(payload[i]);
+                }
             }
-            break;
+
+            for (size_t i = 0; i < length; i += sizeof(long)) {
+                long word = 0;
+                memcpy(&word, &data[i], std::min(sizeof(long), (size_t)length - i));
+                if (ptrace(PTRACE_POKEDATA, debugee_pid, reinterpret_cast<void *>(address + i), reinterpret_cast<void *>(word)) == -1) {
+                    response = GdbResponse("E01");
+                    break;
+                }
+            }
+
+            response = GdbResponse("OK");
+        }
+        break;
 
         case 's': // Step
-            // Implement the handling of the 's' command using PTRACE API
-            break;
+        {
+            if (ptrace(PTRACE_SINGLESTEP, debugee_pid, nullptr, nullptr) == -1) {
+                response = GdbResponse("E01");
+                break;
+            }
+
+            // Wait for the debugee to stop
+            int status;
+            waitpid(debugee_pid, &status, 0);
+
+            if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
+                response = GdbResponse("S05");
+            } else {
+                response = GdbResponse("E01");
+            }
+        }
+        break;
 
         case 'c': // Continue
             // Implement the handling of the 'c' command using PTRACE API
+            if (ptrace(PTRACE_CONT, debugee_pid, nullptr, nullptr) == -1) {
+                response = GdbResponse("E01");
+                break;
+            }
+            response = GdbResponse("OK");
             break;
 
         case 'T': // Is thread alive?
