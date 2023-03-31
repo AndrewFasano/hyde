@@ -84,6 +84,7 @@ Is the HyDE program something that runs briefly or persistently during guest exe
 * Kernel module filter - prevent kernel modules from being loaded unless they are in a specified list
 * Seccomp detection - identify which processes have enabled syscall filtering with seccomp
 * No-encrypt - identify when a process is rewriting files to increase entropy and kill it (anti-ransomware)
+* No root network listening processes - if a process has an EUID of 0, it cannot listen for network traffic on a public IP
 
 # HyDE Program Taxonomy
 
