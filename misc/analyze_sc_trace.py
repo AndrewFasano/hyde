@@ -1,6 +1,8 @@
 import os
 import sys
 
+from dataclasses import dataclass
+
 jumpers = [59] #execve
 ignores = [15] # sigreturn - signal handler interrupted prior syscall
 exits = [231, 60] # exit
@@ -20,106 +22,201 @@ exit (and friends) never return and asid/fs can be reused in a call
     syscall (callno, asid, pc, rsp) <- noreturn
     syscall (callno asid, NEW pc, NEW rsp) <-- new process
     sysret (asid, new pc, new rsp) <-- return from 2nd syscall
-
 '''
+
+
+@dataclass
+class SyscallRet:
+    """Class for storing a syscall / sysret with cpu state"""
+    is_syscall: bool
+    cpu: int
+    callno: int
+    asid: int
+    pc: int
+    sp: int
+    fs: int
+
+    def __str__(self):
+        if self.is_syscall:
+            return f"syscall[{self.cpu:<01}]({self.callno:>03}, {self.asid:x}, {self.pc:x}, {self.sp:x}, {self.fs:x})"
+        else:
+            return f"sysret[{self.cpu}](___, {self.asid:x}, {self.pc:x}, {self.sp:x}, {self.fs:x})"
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __eq__(self, other):
+        # Direct equality
+        return self.is_syscall == other.is_syscall and self.cpu == other.cpu and self.asid == other.asid and self.callno == other.callno and self.pc == other.pc and self.sp == other.sp and self.fs == other.fs
+    
+    def could_match(self, other):
+        """is there any way this sysret could be from that syscall?"""
+        assert(not self.is_syscall and other.is_syscall)
+        return self.asid == other.asid and self.cpu == other.cpu
+
+    def match(self, other, without=None):
+        # Trying to match a sysret to a syscall
+        if not without:
+            without = []
+        fields = ['asid', 'pc', 'sp', 'fs']
+
+        for x in (without if isinstance(without, list) else [without]):
+            try:
+                fields.remove(x)
+            except ValueError:
+                print("Error no field: ", x)
+                raise
+        
+        for field in fields:
+            if getattr(self, field) != getattr(other, field):
+                return False
+        return True
+
+    def __hash__(self):
+        return hash((self.is_syscall, self.cpu, self.callno, self.asid, self.pc, self.sp, self.fs))
+
+@dataclass
+class Entry:
+    """Class for storing an entry in our log file. line, cpu, and syscall object"""
+    line: int
+    syscallret: SyscallRet
+
+    def __str__(self):
+        return f"Line {self.line}: {self.syscallret}"
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __eq__(self, other):
+        return self.line == other.line and self.syscall == other.syscall
+
+    def __hash__(self):
+        return hash((self.syscallret, self.line))
+
 class SyscallState:
     def __init__(self):
-        self.syscalls = [] # Front is oldest. (cpu, asid, pc, sp, fs, enter_line, enter_callno)
-        self.active = set() # (cpu, asid, pc, sp, fs)
+        self.syscalls = [] # Entry objects
+        self.active = set() # Syscall objects
+
+
+    def handle(self, entry: Entry):
+        '''
+        return false to bail early
+        '''
+        if entry.syscallret.is_syscall:
+            return self.push_syscall(entry)
+        return self.pop_syscall(entry)
+
         
-    def push_syscall(self, line, callno, cpu, asid, pc, sp, fs):
-        if callno == 15: # Ignore sigreturn
-            return
+    def push_syscall(self, entry: Entry):
+        assert(entry.syscallret.is_syscall)
+        if entry.syscallret.callno == 15: # Ignore sigreturn
+            print(f"Ignoring sigreturn: {entry}")
+            return True
         
-        #print(f"\nStore {cpu} {asid:x} {pc:x} {sp:x} {fs:x} {callno}")
-        #print(self.active)
+        # Raise an error on double sysret, unless the last entry was a no-return
+        if entry.syscallret in self.active:
+            abort = True
+            match = None
 
-        if (cpu, asid, pc, sp, fs) in self.active:
-            print(f"Error: double sysenter at {line}: {cpu} {asid:x} {pc:x} {sp:x} {fs:x} {callno}")
-            raise RuntimeError
+            print("We have a total of ", len(self.syscalls), " syscalls active")
 
-        if callno in [231, 60]: # exit
-            # Do not record - we won't see a sysret for this
-            return
+            # Find the most recent match, there has to be one!
+            for i in range(len(self.syscalls)-1, -1, -1): # Start from len()-1, run including 0
+                print("Checking ", self.syscalls[i].syscallret)
+                if entry.syscallret == self.syscalls[i].syscallret:
+                    match = i
+                    break
 
-        if callno in [59]: # execve and friends
-            # Do not record - we won't see a sysret for this
-            # Note, if these fail, we *do* see a sysret. We could record this and then, on the next
-            # syscall in the same asid/fs, cleanup, otherwise cleanup on return (in the rare case of errors)
-            return
+            assert(match is not None)
 
-        self.active.add((cpu, asid, pc, sp, fs))
+            if match:
+                # Found a match - analyze and potentially skip our abort
+                last_callno = self.syscalls[match].syscallret.callno
+                print("Last syscall:", self.syscalls[match].syscallret)
+                if last_callno in [59, 60, 231]: # execve, exit, exit_group
+                    # It's a duplicate, except the last entry was something that wouldn't return so just drop it now
+                    self.syscalls.pop(match)
+                    abort = False
 
-        self.syscalls.append((cpu, asid, pc, sp, fs, line, callno))
+            if abort:
+                print("ERROR: double syscall without sysret")
+                print(f"Prev syscall: {self.syscalls[i]}")
+                print(f"Curr syscall: {entry}")
+                raise RuntimeError
 
-    def pop_syscall(self, line, cpu, asid, pc, sp, fs):
+        self.active.add(entry.syscallret)
+        self.syscalls.append(entry)
+
+        return True
+
+    def pop_syscall(self, entry: Entry):
+        assert(not entry.syscallret.is_syscall)
         # Find the most recent, unpopped syscalls that could be
         # the origin of this sysret using (asid,sp,fs), (asid,pc,fs), (asid,pc,sp) and (asid,fs)
         # Then analyze the potential prior syscalls and, based off their callno, identify which we came from.
         # This works because we know how the prior callno would alter things i.e., arch_getprctl changes fs.
 
-        without_pc = None
-        without_sp = None
-        without_fs = None
-        without_pc_sp = None
-        for i in range(len(self.syscalls)-1, -1, -1): # Start from len()-1, run including 0
-            #print(f"Comparing cpu ({cpu} vs {self.syscalls[i][0]}) and asid ({asid:x} vs {self.syscalls[i][1]:x}) and pc ({pc:x} vs {self.syscalls[i][2]:x}) and ({sp:x} vs {self.syscalls[i][3]:x}) and ({fs:x} vs {self.syscalls[i][4]:x})")
-            if self.syscalls[i][0] != cpu or self.syscalls[i][1] != asid:
-                # Definitely wrong, different CPU or different ASID
+        withouts = {
+            'pc': None,
+            'sp': None,
+            'fs': None,
+            'pc_sp': None
+        }
+
+        for idx, other in reversed(list(enumerate(self.syscalls))):
+            if not entry.syscallret.could_match(other.syscallret):
                 continue
 
-            if self.syscalls[i][2] == pc and self.syscalls[i][3] == sp and without_fs is None:
-                without_fs = i
+            for y in ['pc', 'sp', 'fs', ['pc', 'sp']]:
+                name = ('_'.join(y) if isinstance(y, list) else y)
 
-            if self.syscalls[i][2] == pc and self.syscalls[i][4] == fs and without_sp is None:
-                without_sp = i
+                if withouts[name] is not None:
+                    continue
 
-            if self.syscalls[i][3] == sp and self.syscalls[i][4] == fs and without_pc is None:
-                without_pc = i
+                if entry.syscallret.match(other.syscallret, without=y):
+                    withouts[name] = idx
 
-            # Just asid+FS matches
-            if self.syscalls[i][4] == fs and without_pc_sp is None:
-                without_pc_sp = i
-
-            if not any([x is None for x in [without_pc, without_sp, without_fs, without_pc_sp]]):
+            if not any([x is None for x in withouts.values()]):
                 break
         
-        if all([x is None for x in [without_pc, without_sp, without_fs, without_pc_sp]]):
-            # Didn't find any - yikes. early?
-            print(f"Found nothing for {asid:x} on line {line}")
-            return None
+        if all([x == None for x in withouts.values()]):
+            raise ValueError(f"All matches are none for {entry}")
 
-        last_sc = None
-        if (without_pc == without_fs and without_fs == without_sp and without_sp == without_pc_sp):
+        last_sc = None # It's an entry
+        if (withouts['pc'] == withouts['fs'] and withouts['fs'] == withouts['sp'] and withouts['sp'] == withouts['pc_sp']):
             # All the same, easy case
-            last_sc = self.syscalls.pop(without_pc) # Grab any, they're all the same
+            last_sc = self.syscalls.pop(withouts['pc']) # Grab any, they're all the same
         else:
             # Need to decide which one to believe
             # We can examine the callno from each and decide if it's worth taking or not
 
-            # Maybe we shouldn't ever hit this case - we shouldn't record the execve since it's a noreturn
-            if without_pc_sp and self.syscalls[without_pc_sp][-1] in [59]:
-                # PC changed because of execve - this syscall seems right
-                last_sc = self.syscalls.pop(without_pc_sp)
+            if withouts['pc'] is not None and withouts['pc'] == withouts['fs'] and withouts['fs'] == withouts['sp']:
+                # We saw something when we searched on just asid,fs but it wasn't an execve so let's use what we got ??
+                last_sc = self.syscalls.pop(withouts['pc'])
 
-            elif without_pc == without_fs and without_fs == without_sp:
-                # We saw something when we searched on just asid,fs but it wasn't an execve so let's use what we got
-                last_sc = self.syscalls.pop(without_pc)
-
-            elif without_fs and self.syscalls[without_fs][-1] in [158]:
-                # FS changed because of arch_prctl
-                last_sc = self.syscalls.pop(without_fs)
+            elif withouts['fs'] is not None and self.syscalls[withouts['fs']].syscallret.callno in [158, 95]:
+                # FS changed because of arch_prctl or umask
+                last_sc = self.syscalls.pop(withouts['fs'])
             else:
-                print(f"TODO: {line}")
-                for x in [without_pc, without_fs, without_sp, without_pc_sp]:
-                    print(x, "callno:", self.syscalls[x][-1], "line:", self.syscalls[x][-2], "asid:", hex(self.syscalls[x][1]))
+                print(f"ERROR: failed to map {entry} back to a syscall")
+                for name, val in withouts.items():
+                    if val is None:
+                        print("No value for ", name)
+                    else:
+                        print(name, self.syscalls[val])
+
+                print("Potential syscalls we could have come from (asid, cpu)")
+                for x in self.syscalls:
+                    if x.syscallret.could_match(entry.syscallret):
+                        print(x)
 
         if last_sc:
-            assert(last_sc[0:5] in self.active)
-            self.active.remove((last_sc[0:5]))
-            print(f"Syscall from line {line} seems to be return from line {last_sc[-2]} which was callno {last_sc[-1]}")
+            print(f"{entry} -> {last_sc}")
+            assert(last_sc.syscallret in self.active)
+            self.active.remove(last_sc.syscallret)
 
-        return last_sc is None
+        return last_sc is not None # Return false to bail early
 
 def parse(file_name, outfile):
     with open (outfile, "w") as out:
@@ -204,22 +301,12 @@ def analyze_file(file_name):
             pc = int(parts[5], 16)
             sp = int(parts[6], 16)
             fs = int(parts[7], 16)
-            key = (asid, fs, sp)
-            no_sp_key = (asid, fs)
 
-            '''
-            if key not in seen:
-                seen.add(key)
-                if not is_syscall:
-                    print(f"{line}: first time seeing {key} and it's on return - allow")
-                    continue # We didn't see the enter, so we don't care about the exit
-            '''
+            record = Entry(line, SyscallRet(is_syscall, cpu, callno, asid, pc, sp, fs))
 
-            if is_syscall:
-                S.push_syscall(line, callno, cpu, asid, pc, sp, fs)
-            else:
-                if S.pop_syscall(line, cpu, asid, pc, sp, fs):
-                    break # Got an error if it returns True
+            if not S.handle(record):
+                print(f"Bailing early for failure with {record}")
+                break # Debugging, quit early sometimes
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -230,6 +317,6 @@ if __name__ == '__main__':
         else:
             out = "out.csv"
 
-        if not os.path.isfile(out):
-            parse(sys.argv[1], out)
+        #if not os.path.isfile(out):
+        #    parse(sys.argv[1], out)
         analyze_file(out)
