@@ -8,6 +8,9 @@
 #include <sys/user.h> // GETREGS layout for x86_64
 #include <mutex>
 #include <string.h>
+#include <iostream>
+#include <iomanip>
+#include <sstream>
 
 
 // Headers for webserver
@@ -313,6 +316,115 @@ int generate_response(char* inbuffer, char*outbuffer) {
   return strlen(outbuffer);
 }
 
+std::string serialize_register(unsigned long long val, int bytes) {
+  // GPT4
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (int i = bytes - 1; i >= 0; i--) {
+        oss << std::setw(2) << ((val >> (i * 8)) & 0xff);
+    }
+    return oss.str();
+}
+
+std::string serialize_gdb_registers(struct user_regs_struct& regs) {
+    // GPT4 original, then bugs fixed
+    // ['RAX', 'RBX', 'RCX', 'RDX', 'RSI', 'RDI', 'RBP', 'RSP',
+    // 'R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'RIP']] + \
+    // [(reg, 4) for reg in ['EFLAGS', 'CS', 'SS', 'DS', 'ES', 'FS', 'GS']],
+
+
+    std::ostringstream oss;
+    oss << serialize_register(regs.rax, 8); // Orig RAX?
+    oss << serialize_register(regs.rbx, 8);
+    oss << serialize_register(regs.rcx, 8);
+    oss << serialize_register(regs.rdx, 8);
+    oss << serialize_register(regs.rsi, 8);
+    oss << serialize_register(regs.rdi, 8);
+    oss << serialize_register(regs.rbp, 8);
+    oss << serialize_register(regs.rsp, 8);
+    oss << serialize_register(regs.r8, 8);
+    oss << serialize_register(regs.r9, 8);
+    oss << serialize_register(regs.r10, 8);
+    oss << serialize_register(regs.r11, 8);
+    oss << serialize_register(regs.r12, 8);
+    oss << serialize_register(regs.r13, 8);
+    oss << serialize_register(regs.r14, 8);
+    oss << serialize_register(regs.r15, 8);
+    oss << serialize_register(regs.rip, 8);
+
+    oss << serialize_register(regs.eflags & 0xffff, 4);
+    oss << serialize_register(regs.cs & 0xffff, 4);
+    oss << serialize_register(regs.ss & 0xffff, 4);
+    oss << serialize_register(regs.ds & 0xffff, 4);
+    oss << serialize_register(regs.es & 0xffff, 4);
+    oss << serialize_register(regs.fs & 0xffff, 4);
+    oss << serialize_register(regs.gs & 0xffff, 4);
+
+    return oss.str();
+}
+
+class GDBServer {
+public:
+    void handle_qXfer(const string& pkt) {
+        if (pkt.starts_with("qXfer:exec-file:read:")) {
+            // Assuming no annex value
+            auto last_part = pkt.substr(pkt.rfind(":") + 1);
+            auto offset_hex = last_part.substr(0, last_part.find(","));
+            auto length_hex = last_part.substr(last_part.find(",") + 1);
+            int offset = stoi(offset_hex, nullptr, 16);
+            int length = stoi(length_hex, nullptr, 16);
+
+            if (offset < pathname.size()) {
+                writePacket("m" + pathname.substr(offset, length));
+            } else {
+                writePacket("l"); // it's an L
+            }
+
+        } else if (pkt.starts_with("qXfer:auxv:read:")) {
+            auto last_part = pkt.substr(pkt.rfind(":") + 1);
+            auto offset_hex = last_part.substr(0, last_part.find(","));
+            auto length_hex = last_part.substr(last_part.find(",") + 1);
+            int offset = stoi(offset_hex, nullptr, 16);
+            int length = stoi(length_hex, nullptr, 16);
+
+            string fname = "/proc/" + to_string(child_pid) + "/auxv";
+            int flags = 0; // effectively O_RDONLY
+            int mode = 0; // ignored
+
+            auto fd = dbg_ipc.inject_syscall(Syscall("open", {fname, flags, mode}, true));
+            if (fd < 0) {
+                cerr << "Auxv open failed" << endl;
+                writePacket("E01"); // EACCESS?
+                return;
+            }
+
+            try {
+                auto data = dbg_ipc.inject_helper({"read", fd, length, offset});
+                dbg_ipc.inject_syscall(Syscall("close", {fd}));
+                auto [real_len, encoded] = gdb_binary_escape(data, length);
+                auto pkt = "l" + encoded;
+                writePacket(pkt);
+            } catch (const ValueError& e) {
+                writePacket("E01");
+                return;
+            }
+
+        } else {
+            throw ValueError("Unsupported " + pkt);
+        }
+    }
+
+private:
+    int child_pid;
+    string pathname;
+    DebugIPC dbg_ipc;
+    void writePacket(const string& pkt) {
+        // stub for writePacket function
+    }
+};
+
+
+
 int handle_message(char* buffer, size_t buffer_size, char* response) {
   buffer[buffer_size] = 0;
   //printf("Got message %s\n", buffer);
@@ -395,7 +507,7 @@ int handle_message(char* buffer, size_t buffer_size, char* response) {
   switch (command[0]) {
     case 'q': {
       if (strcmp(command, "qSupported") == 0) {
-        snprintf(response, PACKET_SIZE, "PacketSize=%x,qXfer:exec-file:read,multiprocess+", PACKET_SIZE);
+        snprintf(response, PACKET_SIZE, "PacketSize=%d;qXfer:exec-file:read+;multiprocess+;qXfer:auxv:read+", PACKET_SIZE);
       } else if (strcmp(command, "qTStatus") == 0) {
         // Respond with nothing
       } else if (strcmp(command, "qfThreadInfo") == 0) {
@@ -404,6 +516,49 @@ int handle_message(char* buffer, size_t buffer_size, char* response) {
       } else if (strcmp(command, "qAttached") == 0) {
         // TODO: needs updating if we support multiple processes
         sprintf(response, "%d", 0);
+      } else if (strcmp(command, "qXfer") == 0) {
+        // Read guest file
+        // offset, length = [int(x, 16)  for x in pkt.split(":")[-1].split(",")]
+
+        char* read_loc = strstr(args, "read:");
+        if (read_loc == NULL) {
+            printf("Error: qXfer input string is not in the expected format\n");
+            break;
+        }
+
+        // Parse the two integers before the colon
+        char* colon_loc = strchr(read_loc, ':');
+        if (colon_loc == NULL) {
+            printf("Error: qXfer input string is not in the expected format\n");
+            break;
+        }
+        *colon_loc = '\0'; // terminate the string here temporarily
+        int int1 = stoi(read_loc + 5); // skip "read:" in the string
+
+        char* next_colon_loc = strchr(colon_loc + 1, ':');
+        if (next_colon_loc == NULL) {
+            cerr << "Error: input string is not in the expected format" << endl;
+            return 1;
+        }
+        *next_colon_loc = '\0'; // terminate the string here temporarily
+        int int2 = stoi(colon_loc + 1);
+
+        // Parse the integer after the comma
+        char* comma_loc = strchr(next_colon_loc + 1, ',');
+        if (comma_loc == NULL) {
+            cerr << "Error: input string is not in the expected format" << endl;
+            return 1;
+        }
+        int int3 = stoi(comma_loc + 1);
+
+
+        if (strcmp(command, "qXfer:exec-file:read:") == 0) {
+          // Read file
+
+        } else if (strcmp(command, "qXfer:auxv:read:") == 0) {
+          // Read auxv
+
+        }
 
       } else {
         printf("TODO:  unsupported q command: %s\n", command);
@@ -475,14 +630,17 @@ int handle_message(char* buffer, size_t buffer_size, char* response) {
       assert(pending_command[0] == 0);
       pending_command[0] = 'g';
 
+      printf("Waiting for g command\n");
       while (pending_command[0] != 0) {
         // Stall until we have register data from other thread
-        usleep(100000000);
+      printf("stall\n");
+        usleep(10000);
       }
-      printf("Finished with g command\n");
+      printf("Finished waiting for g command\n");
 
       // We have data in our user_regs_struct gregs but now
       // we need to populate a regs_struct regs with that data
+#if 0
       regs_struct regs = {
         .rax = gregs.rax,
         .rbx = gregs.rbx,
@@ -512,6 +670,11 @@ int handle_message(char* buffer, size_t buffer_size, char* response) {
         sprintf(responsep, "%02x", ((uint8_t*)&regs)[i]);
         responsep += 2;
       } 
+#endif
+
+      std::string gdb_registers = serialize_gdb_registers(gregs);
+      strncpy(response, gdb_registers.c_str(), gdb_registers.size());
+
       break;
     } // End of g case
 

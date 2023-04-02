@@ -154,13 +154,13 @@ SyscCoro ps_in_root(asid_details *details)
         co_yield *(details->orig_syscall);
         co_return ExitStatus::SUCCESS; // Not an error
 
-    }else if (!running_in_root_proc.try_lock()) {
+    } else if (!running_in_root_proc.try_lock()) {
         // Lock unavailable, bail on this coopter
         // Note we don't want to wait since that would block a guest proc
         co_yield *(details->orig_syscall);
         co_return ExitStatus::SUCCESS; // Not an error
-
     }
+
     // Now running in a root process with the lock
     std::vector<int> pids;
     // Get list of PIDs

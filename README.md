@@ -16,6 +16,14 @@ and a virtual serial console can be accessed.
 Both users and providers would benefit if providers were able to provide additional ways for users to
 examine and control their systems. For example, consider the following problems that users may encounter:
 
+For evaluation: "HyDE adds functionality without sacrificing reliability and has minimal performance cost"
+
+# PROBLEM CATEGORIES
+* Observability - Can't tell basic things about what's happening
+* Recovery/Resiliance - Get back in, restart services
+* Out of band security
+* Shimming - Maybe? - Substitute paravirtualization for full virtualization
+
 ## Problems for users of virtualized systems
 * Diagnosing unexpected system behavior  - buggy code, misconfiguration, or malicious actors lead system to take ggunexpected actions. Enumerating processes and interactively debugging them requires accessing the guest and installing new software
 * Lost access to guest system - password forgotten, ssh server or RDP is stopped, crashes, or is misconfigured
@@ -102,16 +110,60 @@ Is the HyDE program something that runs briefly or persistently during guest exe
 | Seccomp detection | identify which processes have seccomp enabled | P| UN| L/OM| LL |
 | Optimization | transparently change how programs interact with hardware | A| UN| OM| LL |
 
-And more!
+#### Wil Categorization idea
+HyDe progs can basically:
+* Inject new syscalls
+* Modify existing syscalls
+* Change return values
+
+It's an event-oriented programming model - "reactive programming" - event is syscall, and our programs run inside guest processes, and chose to include the event (or a modified version of it) among other events  
 
 
 # Example programs
-| Program Name | Program Type | Summary | Implemented | SLoC | Test status |
-| :----        | :---         | :---    | :---:       | :--- | :---:       |
-| PwReset      | File manager | Change password hashes  | Yes | 165 | works on ubuntu 18.04
-| EnvMgr       | Execution addition | Add environment variable | Yes | 91 | works on ubuntu 18.04
-| SecretFile   | Pseudofile addition | Conditionally allow reads of a (host-managed) pseudofile | Yes |  139 | works on ubuntu 18.04
-| PS           | Introspection | List currently running processes | Yes |  144 | works on ubuntu 18.04
-| Attest       | Execution filter | Checksum binaries before they're allowed to run (TODO: and libraries) | Yes |  105 | works on ubuntu 18.04
-| LaunchSSH    | Program launcher | Restart the ssh daemon | Yes | 106 | works on ubuntu 18.04
-| SBOM         | Introspection | Report hashes of binaries that are run and files mapped into memory | Yes |  202 | works on ubuntu 18.04
+| Program Name | Program Type           | Summary                                                               | Implemented | SLoC | Test status |
+| :----        | :---                   | :---                                                                  | :---:       | :--- | :---:       |
+| PwReset      | File manager           | Change password hashes                                                | Yes         |  90 | works on ubuntu 18.04
+| EnvMgr       | Execution addition     | Add environment variable                                              | Yes         |  89 | works on ubuntu 18.04
+| SecretFile   | Pseudofile addition    | Conditionally allow reads of a (host-managed) pseudofile              | Yes         | 125 | works on ubuntu 18.04
+| PS           | Introspection          | List currently running processes                                      | Yes         | 131 | works on ubuntu 18.04
+| LaunchSSH    | Program launcher       | Restart the ssh daemon                                                | Yes         | 107 | works on ubuntu 18.04
+| Attest       | Execution filter       | Checksum binaries and libraries before they're allowed to run/load    | Yes         | 192 | works on ubuntu 18.04
+| SBOM         | Introspection          | Report hashes of binaries that are run and files mapped into memory   | Yes         | 160 | works on ubuntu 18.04
+| HDBServer    | Debugger               | Provide a GDBserver interface for process-level debugging             | Yes         |  | 
+
+Debuggere
+Version checking, dependencies of programs that are run
+
+Note implementation limitation that these don't stack
+
+# Eval
+Long running (24h), run standard linux benchmark in a loop, examine dmesg
+    phronix
+    specpu2017
+    coreutils test suite
+    expected outputs and status
+    System health over time - collect dmesg output, manually find signals
+
+Baseline:
+    Standard KVM
+
+Baseline 2:
+    HyDE KVM with HyDE disabled?
+
+
+Whole system programming model - implementation provides an interface
+need strong motivation before design constraints
+
+
+Compared to memory forensics - we're cross platform and not brittle
+    Don't do full eval of deltas
+    Syscall interface is narrow and less likely to change
+    Expectation of stability within OS - look at some linux distros and versions
+
+Common HyDE program design:
+    Preamble to check if it's a target - i.e., read a string (page it in)
+        Note the preamble often requires sycall injection - can we measure how often strings are paged out?
+    If so, run some new logic and possibly the original syscall
+    Otherwise, just run the original syscall, leaving the system alone
+
+    
