@@ -103,7 +103,7 @@ Is the HyDE program something that runs briefly or persistently during guest exe
 | Debugger | start debugging a selected process | A| UN| L| OD |
 | File manager | add, delete, or modify a guest file | A| UN| L| OD |
 | Program launcher | spawn a guest program | A| UN| L| OD |
-| Execution filter | ensure only known binaries can run with known libraries | A| UN| L| LL |
+| Execution filter | conditionally block execution of a binary or loading of a library | A| UN| L| LL |
 | Execution addition | conditionally provide information to launched programs | A| CO| L| LL |
 | Pseudofile addition | conditionally allow reads of a file | A| CO| L| LL |
 | Kernel module filter | restrict which kernel modules can be run | A| UN| L/OM| LL |
@@ -129,7 +129,9 @@ It's an event-oriented programming model - "reactive programming" - event is sys
 | LaunchSSH    | Program launcher       | Restart the ssh daemon                                                | Yes         | 107 | works on ubuntu 18.04
 | Attest       | Execution filter       | Checksum binaries and libraries before they're allowed to run/load    | Yes         | 192 | works on ubuntu 18.04
 | SBOM         | Introspection          | Report hashes of binaries that are run and files mapped into memory   | Yes         | 160 | works on ubuntu 18.04
-| HDBServer    | Debugger               | Provide a GDBserver interface for process-level debugging             | Yes         |  | 
+| HDBServer    | Debugger               | Provide a GDBserver interface for process-level debugging             | Yes         | | 
+| 2FA          | Execution filter       | Sudo blocks until HP is told it's okay                                | No          | |
+| NoLKM        | Execution filter       | Prevent loading additional kernel modules                             | No          | |
 
 Debuggere
 Version checking, dependencies of programs that are run
