@@ -85,7 +85,7 @@ SyscCoro pre_exec(asid_details* details) {
 
   // Write our `inject` string into buffer, will have address saved at injected_arg
   char* inject_c = (char*)inject.c_str();
-  printf("Writing new string at %lx\n", guest_buf);
+  //printf("Writing new string at %lx\n", guest_buf);
   if (yield_from(ga_memwrite, details, guest_buf, (void*)inject_c, inject.length()+1) == -1) {
     printf("[EnvMgr] Error writing %lu bytes from hva %lx to gva %lx\n", inject.length()+1, (uint64_t)inject_c, guest_buf);
     goto cleanup_buf;
@@ -108,7 +108,7 @@ SyscCoro pre_exec(asid_details* details) {
   // then cast it to a char[] and yield an execve syscall with execve(orig_arg(0), orig_arg(1), host_envp)
 
   // Add our new variable, then a null terminator
-  printf("Write new var pointer at %lx (points to %lx)\n", (guest_buf + (i * sizeof(uint64_t))), (uint64_t)&injected_arg );
+  //printf("Write new var pointer at %lx (points to %lx)\n", (guest_buf + (i * sizeof(uint64_t))), (uint64_t)&injected_arg );
   if (yield_from(ga_memwrite, details, guest_buf + (i * sizeof(uint64_t)), (void*)&injected_arg, sizeof(char*)) == -1) {
     printf("[EnvMgr] Error mapping pointer for injected variable\n");
     goto cleanup_buf;
