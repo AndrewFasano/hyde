@@ -11,12 +11,13 @@
 
 #include "hyde.h"
 bool alive = true;
-bool wait_for_oob_validate = false;
 bool validated = false;
 
-// When a process tries to switch it's UID/GID to 0, we ask via
-// a TCP socket if we should allow it. This is a simple way to
-// implement 2FA for root escalation.
+// When a process tries to switch it's UID/GID to 0, we output a code
+// from the VMM and require the user to type it
+// Unfortunately sudo ends up doing this in 2 processes, the grandparent
+// and the grandchild. So we don't see the relationship between the two
+// and have to prompt twice
 
 // When a process requests a change, we store it's name, PID and the
 // last timestamp when we got a response. We don't reprompt for ~5s
@@ -26,30 +27,59 @@ std::string pending_proc;
 int pending_pid = -1;
 time_t last_resp_time = 0; 
 
+#if 0
+      // Check the response
+      if (input == "y" || input == "n") {
+        validated = input == "y";
+        last_resp_time = time(NULL);
+
+        send(newsockfd, ok_msg.c_str(), ok_msg.size(), 0);
+      } else {
+        send(newsockfd, error_msg.c_str(), error_msg.size(), 0);
+      }
+    }
+#endif
+
+
 SyscCoroHelper stall_for_input(asid_details* details, int pid) {
-  // Block until user input. We should inject sleeps in the guest but eh.
-  if (pid == pending_pid && time(NULL) - last_resp_time < 5) {
+  // If we've already validated this process, don't prompt again, just return same
+  if (pid == pending_pid && time(NULL) - last_resp_time < 10) {
     // Don't prompt for the same process too often
     co_return (validated) ? 0 : -1;
   }
 
-  wait_for_oob_validate = true;
-  pending_pid = pid;
+  while (1) {
+    // Generate a 6 digit random value - print on VMM
+    int code = rand() % 1000000;
+    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Code: " << code << std::endl;
 
-  int stall_count = 0;
+    const char prompt[] = "2FA: Enter code to allow process to run as root (or press enter to cancel): ";
+    char response[100];
+    // Print the prompt in the guest with yield_syscall, then get a response
+    // from the user with yield_from. This is a bit hacky, but it works.
+    yield_syscall(details, write, 1, prompt, sizeof(prompt));
+    yield_syscall(details, read, 0, response, sizeof(response));
+    // Can we make this read timeout?
 
-  #define WAIT_NSEC 100000000 // Set the desired wait interval in nanoseconds, e.g., 100,000,000 ns (100 ms)
+    std::cout << "[2FA VMM] Got response: " << response << std::endl;
+    int resp_code = atoi(response);
 
-  while (wait_for_oob_validate) {
-
-    if (stall_count++ > (10 * 1e9 / WAIT_NSEC)) { // Calculate the number of iterations for 10 seconds
-      std::cout << "No user input for " << pending_proc << " (" << pending_pid << ") after 10s, blocking..." << std::endl;
-      wait_for_oob_validate = false;
-      last_resp_time = time(NULL);
-      co_return -1;
+    if (resp_code == -1) {
+      // No integer (e.g., empty) - bail
+      std::cout << "[2FA VMM] - non-integer response, blocking process" << std::endl;
+      break;
     }
-    struct timespec ts = {0, WAIT_NSEC};
-    yield_syscall(details, nanosleep, &ts);
+
+    pending_pid = pid;
+    last_resp_time = time(NULL);
+    validated = (resp_code == code);
+
+    if (validated) {
+      std::cout << "[2FA VMM] Code accepted" << std::endl;
+      break;
+    }else {
+      std::cout << "[2FA VMM] Invalid code - reprompting" << std::endl;
+    }
   }
 
   co_return (validated) ? 0 : -1;
@@ -97,109 +127,6 @@ SyscCoro validate(asid_details* details) {
 
   co_yield *(details->orig_syscall);
   co_return ExitStatus::SUCCESS;
-}
-
-// Function to bind and listen on a socket for TCP connections
-int bind_and_listen(int port) {
-  int sockfd;
-  struct sockaddr_in serv_addr;
-
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    printf("ERROR opening socket %d\n", sockfd);
-    return -1;
-  }
-
-  // Now bind the host address using bind() call.
-  bzero((char *) &serv_addr, sizeof(serv_addr));
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_addr.s_addr = INADDR_ANY;
-  serv_addr.sin_port = htons(port);
-
-  // Next, we bind the socket to the address and port number
-  if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-    printf("ERROR on binding %d\n", sockfd);
-    return -1;
-  }
-
-  // Now start listening for the clients, here process will
-  // go in sleep mode and will wait for the incoming connection
-  listen(sockfd, 5);
-  return sockfd;
-}
-
-void handle_input(int sockfd) {
-  std::string input;
-  std::string error_msg = "Invalid input. Please enter 'y' or 'n'.\n";
-  std::string ok_msg = "Got it\n";
-  char prompt[1024];
-
-  const int buffer_size = 256;
-  char buffer[buffer_size];
-
-
-  while (alive) {
-
-    int newsockfd = accept(sockfd, (struct sockaddr *) NULL, NULL);
-    if (newsockfd < 0) {
-      printf("ERROR on accept %d\n", newsockfd);
-      close(newsockfd);
-      continue;
-    }
-
-    while (alive) {
-
-      // Wait until guest is waiting for input
-      while (!wait_for_oob_validate) sleep(1);
-
-      snprintf(prompt, sizeof(prompt), "Guest process %s (%d) attempts to sudo. Allow? y/n: ", pending_proc.c_str(), pending_pid);
-
-      ssize_t sent_bytes = send(newsockfd, prompt, strlen(prompt), 0);
-      assert(sent_bytes > 0);
-
-      ssize_t received_bytes = recv(newsockfd, buffer, buffer_size - 1, 0);
-      assert(received_bytes > 0);
-
-      buffer[received_bytes] = '\0';  // Add a null terminator
-      input = std::string(buffer).substr(0, received_bytes - 1); // Remove newline
-
-      // Check the response
-      if (input == "y" || input == "n") {
-        validated = input == "y";
-        last_resp_time = time(NULL);
-
-        wait_for_oob_validate = false;
-        send(newsockfd, ok_msg.c_str(), ok_msg.size(), 0);
-      } else {
-        send(newsockfd, error_msg.c_str(), error_msg.size(), 0);
-      }
-    }
-
-    close(newsockfd);
-  }
-}
-
-std::thread *t = NULL;
-void __attribute__ ((constructor)) setup(void) {
-    // Create a listening socket and launch a thread to handle connections
-    int port = 4444;
-    if (getenv("TWOFA_PORT") != NULL && atoi(getenv("TWOFA_PORT")) != 0) {
-      port = atoi(getenv("TWOFA_PORT"));
-    } else {
-      printf("WARN: environ var TWOGA_PORT not set using default %d\n", port);
-    }
-    int sockfd = bind_and_listen(port);
-
-    std::thread t1(handle_input, sockfd);
-    // We have to detach the thread, otherwise it will think it was abandoned and terminate
-    t1.detach();
-
-    // But we need to keep a reference to it so we can join it on shutdown
-    t = &t1;
-}
-
-void __attribute__ ((destructor)) teardown(void) {
-  alive = false;
 }
 
 create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
