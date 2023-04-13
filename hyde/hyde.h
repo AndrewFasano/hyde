@@ -24,6 +24,11 @@
     auto h = f(__VA_ARGS__).h_; \
     auto &promise = h.promise(); \
     int rv = 0; \
+    if (h.done()) { \
+      /* Edge case: no co_yields in target. Get final \
+      result without running the subsequent loop */ \
+      rv = promise.retval; \
+    } \
     while (!h.done()) { \
         co_yield promise.value_; \
         h(); /* Advance the other coroutine  */ \
