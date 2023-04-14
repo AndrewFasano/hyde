@@ -1,9 +1,16 @@
 #include <stdio.h>
 #include <string>
 #include "hyde.h"
-
-// for std::cout
 #include <iostream>
+
+// Read the pathname passed to all open/openat syscalls.
+// Count the total number of times we see those syscalls and
+// the total number of times we can't read the pathname.
+// Report results on exit.
+
+// If BASELINE is defined, we don't use syscall injection,
+// otherwise we do.
+// #define BASELINE
 
 uint64_t failc = 0;
 uint64_t goodc = 0;
@@ -42,8 +49,10 @@ SyscCoro start_coopter(asid_details *details)
         if (strlen(path) > 0) {
             goodc++;
         } else {
-            failc++; // XXX: These aren't failures - just want to make sure we examine these by hand and decide they're correct
-            printf("Woah2, we got an empty path string\n");
+            goodc++;
+            // This isn't a failure, but if we see it often, we should investigate
+            // Seems to show up once in coreutils tests suite - sounds reasonable
+            printf("\nXXX: we got an empty path string\n\n");
         }
     }
 #endif
