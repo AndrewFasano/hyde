@@ -18,6 +18,33 @@
 #include "hyde_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
 
+
+/* There are a couple of syscalls where namespace conflicts make things
+ * less clean than normal for users of yield_syscall:
+ * stat, times, gettimeofday, settimeofday.
+ *  For these, we define simple wrappers with a
+ * trailing _ to distinguish them.
+ */
+
+#include <sys/stat.h> // include stat function declaration
+#include <sys/times.h> // times, gettimeofday
+#define SYS_stat_ SYS_stat
+#define SYS_times_ SYS_times
+#define SYS_gettimeofday_ SYS_gettimeofday
+inline int stat_(const char *path, struct stat *buf) {
+        return ::stat(path, buf);
+}
+
+inline clock_t times_(struct tms *buf) {
+        return ::times(buf);
+}
+
+inline int gettimeofday_(struct timeval *tv, struct timezone *tz) {
+    return ::gettimeofday(tv, tz);
+}
+
+
+
 /* Yield_from runs a HydeCoro<hsyscall, uint>, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
 #define yield_from(f, ...) \
   ({ \
