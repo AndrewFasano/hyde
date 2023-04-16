@@ -27,7 +27,8 @@
  */
 
 #include <sys/stat.h> // include stat function declaration
-#include <sys/times.h> // times, gettimeofday
+#include <sys/time.h> // gettimeofday
+#include <sys/times.h> // times
 #define SYS_stat_ SYS_stat
 #define SYS_times_ SYS_times
 #define SYS_gettimeofday_ SYS_gettimeofday
