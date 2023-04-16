@@ -67,14 +67,14 @@ inline int gettimeofday_(struct timeval *tv, struct timezone *tz) {
   })
 
 // Coroutine helpers - HyDE programs can yield_from these and the helpers can inject more syscalls if they'd like
-SyscCoroHelper ga_memcpy_one(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoroHelper ga_memcpy(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoroHelper ga_memread(asid_details* r, void* out, uint64_t gva, size_t size);
-SyscCoroHelper ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size);
-SyscCoroHelper ga_map(asid_details* r, uint64_t gva, void** host, size_t min_size);
+SyscCoroHelper ga_memcpy_one(syscall_context* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memcpy(syscall_context* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memread(syscall_context* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memwrite(syscall_context* r, uint64_t gva, void* in, size_t size);
+SyscCoroHelper ga_map(syscall_context* r, uint64_t gva, void** host, size_t min_size);
 
-int get_arg(asid_details* details, RegIndex idx);
-void set_retval(asid_details* details, int retval);
+int get_arg(syscall_context* details, RegIndex idx);
+void set_retval(syscall_context* details, int retval);
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
@@ -126,7 +126,7 @@ void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
 } 
 
 template <typename... Args>
-SyscCoroHelper map_args_to_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
+SyscCoroHelper map_args_to_guest_stack(syscall_context* details, uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
   // Given a tuple of arguments with types and sizes, map those arguments, with concrete
   // pointer values stored in pending->args to the guest stack
 
@@ -156,7 +156,7 @@ SyscCoroHelper map_args_to_guest_stack(asid_details* details, uint64_t stack_add
 }
 
 template <typename... Args>
-SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_addr, hsyscall *sc, Args&&... args) {
+SyscCoroHelper map_args_from_guest_stack(syscall_context* details, uint64_t stack_addr, hsyscall *sc, Args&&... args) {
   // We just ran syscall sc, iterate through it's arguments, identifying poitners and yield syscalls to map them back
 
   for (int i = 0; i < sc->nargs; i++) {
