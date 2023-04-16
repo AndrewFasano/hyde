@@ -25,8 +25,7 @@ SyscCoro start_coopter(asid_details *details)
     RegIndex path_arg = RegIndex::ARG0;
 
     if (details->orig_syscall->callno == SYS_openat) {
-        // openat: path pointer is second argument
-        // TODO: do we care about resolving dirfd? Could use fcntls to get path
+        // openat: path pointer is second argument - we won't bother resolving dirfd
         path_arg = RegIndex::ARG1;
     }
 
@@ -40,7 +39,6 @@ SyscCoro start_coopter(asid_details *details)
         goodc++;
     }
 #else
-
     // Read path pointer
     char path[8];
     if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
