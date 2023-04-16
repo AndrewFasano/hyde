@@ -169,7 +169,8 @@ SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_a
 }
 
 /* No arguments */
-#define yield_syscall0(details, func) ({                                 \
+#define yield_syscall0(details, func) ({  \
+  printf("Deprecated yield_syscall0 -> change to yield_syscall\n"); \
   co_yield build_syscall<SYS_##func>(::func, 0); \
   details->last_sc_retval;                                              \
 })
@@ -181,8 +182,8 @@ SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_a
  * syscall which was set in details->last_sc_ret.
  */
 #define yield_syscall(details, func, ...) ({                                                                \
-  auto arg_types_tup = deduce_types_and_sizes(__VA_ARGS__);                                                    \
-  size_t total_size = accumulate_stack_sizes(arg_types_tup);                                                        \
+  auto arg_types_tup = deduce_types_and_sizes(__VA_ARGS__);                                                 \
+  size_t total_size = accumulate_stack_sizes(arg_types_tup);                                                \
   size_t padded_total_size = total_size + (1024 - (total_size % 1024));                                     \
   /*printf("Total stack size is %lu, padded to %lu\n", total_size, padded_total_size);*/                    \
   uint64_t guest_stack = 0;                                                                                 \
@@ -193,7 +194,7 @@ SyscCoroHelper map_args_from_guest_stack(asid_details* details, uint64_t stack_a
                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
     guest_stack = details->last_sc_retval; /* TODO: error checking?*/                                       \
   }                                                                                                         \
-  hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, __VA_ARGS__);                                 \
+  hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                               \
   if (total_size > 0)                                                                                       \
   {                                                                                                         \
     /* Now, we've built the syscall and have the scratch stack. Do the mapping!*/                           \
