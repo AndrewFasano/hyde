@@ -73,6 +73,9 @@ SyscCoroHelper ga_memread(asid_details* r, void* out, uint64_t gva, size_t size)
 SyscCoroHelper ga_memwrite(asid_details* r, uint64_t gva, void* in, size_t size);
 SyscCoroHelper ga_map(asid_details* r, uint64_t gva, void** host, size_t min_size);
 
+int get_arg(asid_details* details, RegIndex idx);
+void set_retval(asid_details* details, int retval);
+
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
     //printf("Inject syscall %ld with %ld args, total size %ld\n", SyscallNumber, sizeof...(Args), TotalSize);

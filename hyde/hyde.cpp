@@ -176,3 +176,17 @@ SyscCoroHelper ga_map(asid_details* r,  uint64_t gva, void** host, size_t min_si
 
   co_return 0;
 }
+
+int get_arg(asid_details* details, RegIndex idx) {
+  // New interface that beats get_regs_or_die,
+  // note this gets args from the *original* state
+  // pre-injection, so if you start messing with
+  // those you might see changed results?:w
+  return get_arg(details->orig_regs, idx);
+}
+
+
+void set_retval(asid_details* details, int retval) {
+  details->orig_syscall->retval = retval;
+  details->orig_syscall->has_retval = true;
+}
