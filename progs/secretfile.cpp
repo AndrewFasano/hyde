@@ -30,7 +30,7 @@ bool is_allowed(int pid) {
     return pid % 2; // only odd PID's
 }
 
-SyscCoro pre_close(asid_details *details) {
+SyscallCoroutine pre_close(syscall_context *details) {
     // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
 
     struct kvm_regs regs;
@@ -52,7 +52,7 @@ SyscCoro pre_close(asid_details *details) {
 
 }
 
-SyscCoro pre_read(asid_details *details) {
+SyscallCoroutine pre_read(syscall_context *details) {
     // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
 
     struct kvm_regs regs;
@@ -120,7 +120,7 @@ SyscCoro pre_read(asid_details *details) {
     co_return ExitStatus::SUCCESS;
 }
 
-SyscCoro start_coopter(asid_details *details)
+SyscallCoroutine start_coopter(syscall_context *details)
 {
     ExitStatus rv = ExitStatus::SUCCESS;
     struct kvm_regs regs;

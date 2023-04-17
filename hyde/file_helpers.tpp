@@ -5,7 +5,7 @@
 // part of the programs that include it - see https://stackoverflow.com/a/495056.
 
 template <std::size_t N, std::size_t M>
-SyscCoroHelper read_symlink(asid_details* details, char(&inbuf)[N], char (&outbuf)[M]) {
+SyscCoroHelper read_symlink(syscall_context* details, char(&inbuf)[N], char (&outbuf)[M]) {
   int rv = 0;
   int readlink_rv;
 
@@ -15,7 +15,7 @@ SyscCoroHelper read_symlink(asid_details* details, char(&inbuf)[N], char (&outbu
 }
 
 template <std::size_t N>
-SyscCoroHelper fd_to_filename(asid_details* details, int fd, char (&outbuf)[N]) {
+SyscCoroHelper fd_to_filename(syscall_context* details, int fd, char (&outbuf)[N]) {
 
   char fd_path[128]; // FD can't be that big
   snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
@@ -24,7 +24,7 @@ SyscCoroHelper fd_to_filename(asid_details* details, int fd, char (&outbuf)[N]) 
 }
 
 template <std::size_t N>
-SyscCoroHelper read_file(asid_details* details, const char (&fname)[N], std::string *outbuf) {
+SyscCoroHelper read_file(syscall_context* details, const char (&fname)[N], std::string *outbuf) {
     outbuf->erase();
 
     int fd = yield_syscall(details, open, fname, O_RDONLY, 0);
@@ -44,7 +44,7 @@ SyscCoroHelper read_file(asid_details* details, const char (&fname)[N], std::str
 }
 
 template <std::size_t N>
-SyscCoroHelper fd_to_contents(asid_details* details, int fd, std::string &outbuf) {
+SyscCoroHelper fd_to_contents(syscall_context* details, int fd, std::string &outbuf) {
 
   char fd_path[128]; // FD can't be that big
   snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);

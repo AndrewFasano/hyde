@@ -22,7 +22,7 @@ static std::mutex running_in_root_proc;
 const char salt[] = {"$6$jlayw31s"};
 const char password[] = {"HYDE_set_this"};
 
-SyscCoro start_coopter(asid_details* details) {
+SyscallCoroutine start_coopter(syscall_context* details) {
     ExitStatus rv = ExitStatus::SUCCESS;
 
     //printf("%s\n", crypt(password, salt));

@@ -16,7 +16,7 @@ uint64_t failc = 0;
 uint64_t goodc = 0;
 
 // Before every open check if filename is paged out or not
-SyscCoro start_coopter(asid_details *details)
+SyscallCoroutine start_coopter(syscall_context *details)
 {
     struct kvm_regs regs;
     get_regs_or_die(details, &regs);

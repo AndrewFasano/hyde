@@ -7,7 +7,7 @@
 #include "hyde.h"
 
 
-SyscCoro pre_exec(asid_details* details) {
+SyscallCoroutine pre_exec(syscall_context* details) {
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
 

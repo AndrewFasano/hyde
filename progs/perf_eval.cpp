@@ -8,7 +8,7 @@
 uint64_t counter = 0; 
 int N = -1; // Every N syscalls we'll run inject_getpid
 
-SyscCoro inject_getpid(asid_details* details) {
+SyscallCoroutine inject_getpid(syscall_context* details) {
   //printf("[INJECT before %lu]\n", details->orig_syscall->callno);
   //dump_syscall(details->orig_syscall);
   pid_t pid = yield_syscall0(details, getpid);

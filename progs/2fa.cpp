@@ -41,7 +41,7 @@ time_t last_resp_time = 0;
 #endif
 
 
-SyscCoroHelper stall_for_input(asid_details* details, int pid) {
+SyscCoroHelper stall_for_input(syscall_context* details, int pid) {
   // If we've already validated this process, don't prompt again, just return same
   if (pid == pending_pid && time(NULL) - last_resp_time < 10) {
     // Don't prompt for the same process too often
@@ -85,7 +85,7 @@ SyscCoroHelper stall_for_input(asid_details* details, int pid) {
   co_return (validated) ? 0 : -1;
 }
 
-SyscCoro validate(asid_details* details) {
+SyscallCoroutine validate(syscall_context* details) {
   // sudo is a suid binary, so it's running with an EUID of 0.
   // can we get the original value though?
 

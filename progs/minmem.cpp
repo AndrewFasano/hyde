@@ -1,7 +1,7 @@
 #include <sys/sysinfo.h>
 #include "hyde.h"
 
-SyscCoro start_coopter(asid_details* details) {
+SyscallCoroutine start_coopter(syscall_context* details) {
     struct sysinfo info;
     int rv = yield_syscall(details, sysinfo, &info);
     printf("Guest sysinfo returns %d, uptime is %lu seconds\n", rv, info.uptime);
@@ -25,7 +25,7 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno, long unsigned 
 }
 
 #if 0
-SyscCoro test(asid_details* details) {
+SyscallCoroutine test(syscall_context* details) {
   int fd = 1;
   char out_path[128];
   char in_path[128];
@@ -51,7 +51,7 @@ SyscCoro test(asid_details* details) {
 int main(int argc, char **argv) {
 
   // Start executing the start_coopter coroutine. Say we were co-opting the getuid syscall.
-  asid_details *details = new asid_details({
+  syscall_context *details = new syscall_context({
     .orig_syscall = new hsyscall({
       .callno = __NR_getuid,
       .nargs = 0

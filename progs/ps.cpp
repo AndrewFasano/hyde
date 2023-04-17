@@ -22,7 +22,7 @@ static std::mutex running_in_root_proc;
 static bool done = false;
 
 
-SyscCoroHelper read_file(asid_details *details, char* out_data, char* pathname, int out_size) {
+SyscCoroHelper read_file(syscall_context *details, char* out_data, char* pathname, int out_size) {
     char local_pathname[128];
     assert(strlen(pathname) < sizeof(local_pathname));
     char *start = out_data;
@@ -63,7 +63,7 @@ SyscCoroHelper read_file(asid_details *details, char* out_data, char* pathname, 
     co_return bytes_read;
 }
 
-SyscCoroHelper print_procinfo(asid_details *details, std::vector<int> *pids) {
+SyscCoroHelper print_procinfo(syscall_context *details, std::vector<int> *pids) {
     for (int pid : *pids) {
         char fd_path[128];
         char comm[128];
@@ -93,7 +93,7 @@ SyscCoroHelper print_procinfo(asid_details *details, std::vector<int> *pids) {
 
 }
 
-SyscCoroHelper ls_dir(asid_details *details, char* dirname, std::vector<int> *pids) {
+SyscCoroHelper ls_dir(syscall_context *details, char* dirname, std::vector<int> *pids) {
     int fd;
     long nread;
     char d_type;
@@ -144,7 +144,7 @@ SyscCoroHelper ls_dir(asid_details *details, char* dirname, std::vector<int> *pi
     co_return 0;
 }
 
-SyscCoro ps_in_root(asid_details *details)
+SyscallCoroutine ps_in_root(syscall_context *details)
 {
     // Grab a mutex in a root process, get PIDs from /proc , then print info for each PID
     char target_dir[] = {"/proc"};

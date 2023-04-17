@@ -39,7 +39,7 @@ bool hash_match(const char *path, const char *digest) {
 
 // Duplicate from sbom.cpp
 template <std::size_t N>
-SyscCoroHelper hash_file(asid_details *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
+SyscCoroHelper hash_file(syscall_context *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
   // Hash a file at the specified pointer. write ascii digest into outbuf
   int rv = 0;
   std::string buffer;
@@ -97,7 +97,7 @@ SyscCoroHelper hash_file(asid_details *details, char(&path)[N], unsigned char (&
 }
 
 
-SyscCoro pre_execve_at(asid_details* details) {
+SyscallCoroutine pre_execve_at(syscall_context* details) {
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
   char full_path[256];
@@ -158,7 +158,7 @@ out:
   co_return rv;
 }
 
-SyscCoro pre_execve(asid_details* details) {
+SyscallCoroutine pre_execve(syscall_context* details) {
   struct kvm_regs regs;
   char path[256];
   ExitStatus rv = ExitStatus::SUCCESS;
@@ -194,7 +194,7 @@ SyscCoro pre_execve(asid_details* details) {
   co_return rv;
 }
 
-SyscCoro pre_mmap(asid_details* details) {
+SyscallCoroutine pre_mmap(syscall_context* details) {
   struct kvm_regs regs;
   get_regs_or_die(details, &regs);
   ExitStatus rv = ExitStatus::SUCCESS;

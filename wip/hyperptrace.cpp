@@ -22,6 +22,8 @@
 
 #include "hyde.h"
 
+using namespace std;
+
 
 int target_pid = 1137; // TODO - bash
 
@@ -75,7 +77,7 @@ struct regs_struct {
   uint32_t gs;
 };
 
-SyscCoroHelper drive_child(asid_details* details) {
+SyscCoroHelper drive_child(syscall_context* details) {
   signed long wait_rv;
 
   // We drive the child process we created, making it attach to the target process with ptrace,
@@ -180,7 +182,7 @@ SyscCoroHelper drive_child(asid_details* details) {
   assert(0 && "Unreachable");
 }
 
-SyscCoro find_child_proc(asid_details* details) {
+SyscallCoroutine find_child_proc(syscall_context* details) {
 
     int pid = yield_syscall0(details, getpid);
     int ppid = yield_syscall0(details, getppid);
@@ -199,7 +201,7 @@ SyscCoro find_child_proc(asid_details* details) {
     co_return ExitStatus::SUCCESS;
 }
 
-SyscCoro fork_root_proc(asid_details* details) {
+SyscallCoroutine fork_root_proc(syscall_context* details) {
     int rv = 0;
     int fd;
     int pid;
@@ -226,7 +228,7 @@ SyscCoro fork_root_proc(asid_details* details) {
     co_return ExitStatus::SUCCESS;
 }
 
-SyscCoro indicate_success(asid_details* details) {
+SyscallCoroutine indicate_success(syscall_context* details) {
     // Simple coro to change nothing, but indicate that we're done
     // This runs after we execve'd and abandoned that child
     co_yield *(details->orig_syscall);

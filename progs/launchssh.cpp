@@ -26,7 +26,7 @@ std::vector argv = {"systemctl", "restart", "sshd.service"};
 //const char path[] = {"/bin/sleep"};
 //std::vector argv = {"sleep", "5m"};
 
-SyscCoroHelper drive_child(asid_details* details) {
+SyscCoroHelper drive_child(syscall_context* details) {
     // This will run in the child of our injected fork
     // after we yield execve, this function will never continue
     uint64_t argv_addr;
@@ -71,7 +71,7 @@ fatal:
     co_return -1;
 }
 
-SyscCoro find_child_proc(asid_details* details) {
+SyscallCoroutine find_child_proc(syscall_context* details) {
 
     int pid = yield_syscall0(details, getpid);
     int ppid = yield_syscall0(details, getppid);
@@ -94,7 +94,7 @@ SyscCoro find_child_proc(asid_details* details) {
     co_return ExitStatus::SUCCESS;
 }
 
-SyscCoro fork_root_proc(asid_details* details) {
+SyscallCoroutine fork_root_proc(syscall_context* details) {
     int fd;
     int pid;
     int tid;
@@ -130,7 +130,7 @@ out:
     co_return ExitStatus::SUCCESS; // Even if we're waiting, it's not a failure
 }
 
-SyscCoro indicate_success(asid_details* details) {
+SyscallCoroutine indicate_success(syscall_context* details) {
     // Simple coro to change nothing, but indicate that we're done
     // This runs after we execve'd and abandoned that child
     co_yield *(details->orig_syscall);
