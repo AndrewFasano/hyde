@@ -80,9 +80,7 @@ template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
     //printf("Inject syscall %ld with %ld args, total size %ld\n", SyscallNumber, sizeof...(Args), TotalSize);
     // Now generate an hsyscall object with the syscall number, arguments, and number of args
-    hsyscall s {
-      .callno = SyscallNumber
-    };
+    hsyscall s(SyscallNumber);
  
     // Populate s->args with each of the elements in args and set s->nargs to the number of arguments.
     s.nargs = 0;
