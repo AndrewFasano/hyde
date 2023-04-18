@@ -15,7 +15,7 @@
 #include <utility>
 #include <coroutine>
 
-#include "hyde_common.h"
+#include "plugin_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
 
 
@@ -73,8 +73,9 @@ SyscCoroHelper ga_memread(syscall_context* r, void* out, uint64_t gva, size_t si
 SyscCoroHelper ga_memwrite(syscall_context* r, uint64_t gva, void* in, size_t size);
 SyscCoroHelper ga_map(syscall_context* r, uint64_t gva, void** host, size_t min_size);
 
-int get_arg(syscall_context* details, RegIndex idx);
-void set_retval(syscall_context* details, int retval);
+// Just use details-> for now?
+//int get_arg(syscall_context* details, RegIndex idx);
+//void set_retval(syscall_context* details, int retval);
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
@@ -166,13 +167,6 @@ SyscCoroHelper map_args_from_guest_stack(syscall_context* details, uint64_t stac
   co_return 0;
 }
 
-/* No arguments */
-#define yield_syscall0(details, func) ({  \
-  printf("Deprecated yield_syscall0 -> change to yield_syscall\n"); \
-  co_yield build_syscall<SYS_##func>(::func, 0); \
-  details->last_sc_retval;                                              \
-})
-
 
 /* Helper macro to be used by SyscCoro coroutines. Build an hsyscall using the given function name,
  * yield that hsyscall (which will cause the details object to update place a return in last_sc_ret),
@@ -190,7 +184,7 @@ SyscCoroHelper map_args_from_guest_stack(syscall_context* details, uint64_t stac
     /*printf("AUTO-ALLOCATE %d bytes (rounded up from %d)\n", padded_total_size, total_size);*/             \
     co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                             \
                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
-    guest_stack = details->last_sc_retval; /* TODO: error checking?*/                                       \
+    guest_stack = details->get_result(); /* TODO: error checking?*/                                       \
   }                                                                                                         \
   hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                               \
   if (total_size > 0)                                                                                       \
@@ -199,7 +193,7 @@ SyscCoroHelper map_args_from_guest_stack(syscall_context* details, uint64_t stac
     yield_from(map_args_to_guest_stack, details, guest_stack, &s, arg_types_tup);                           \
   }                                                                                                         \
   co_yield s;                                                                                               \
-  auto rv = details->last_sc_retval;                                                                        \
+  auto rv = details->get_result();                                                                        \
   if (total_size > 0)                                                                                       \
   { /* We previously allocated some stack space for this syscall, sync it back, then free it */             \
     yield_from(map_args_from_guest_stack, details, guest_stack, &s, arg_types_tup);                         \
@@ -211,7 +205,7 @@ SyscCoroHelper map_args_from_guest_stack(syscall_context* details, uint64_t stac
 /* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */
 #define yield_syscall_raw(details, func, ...) ({         \
   co_yield unchecked_build_syscall<SYS_##func>(::func, 0, __VA_ARGS__); \
-  details->last_sc_retval;                                    \
+  details->get_result();                                    \
 })
 
 #endif

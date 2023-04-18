@@ -3,7 +3,7 @@
 # I'm getting internal compiler errors now so let's give clang a shot!
 
 CXX=clang++-15
-CFLAGS=-g -I../qemu/hyde/include/ -I./hyde/ -std=c++20 -Wno-deprecated-declarations
+CFLAGS=-g -I../qemu/hyde/include/ -I./sdk/ -std=c++20 -Wno-deprecated-declarations
 SO_CFLAGS=-fPIC -shared $(CFLAGS)
 LDFLAGS=-fuse-ld=lld
 
@@ -11,7 +11,7 @@ LDFLAGS=-fuse-ld=lld
 SRCS = $(wildcard progs/*.cpp)
 PROGS = $(patsubst %.cpp,%.so,$(SRCS))
 
-HYDE = $(wildcard hyde/*.cpp)
+HYDE = $(wildcard sdk/*.cpp)
 HYDE_O = $(patsubst %.cpp,%.o,$(HYDE))
 
 all: $(PROGS)
@@ -28,7 +28,7 @@ test: test.cpp
 templtest: templtest.cpp
 	$(CXX) $(CFLAGS) $< -o $@
 
-hyde/%.o: hyde/%.cpp
+sdk/%.o: sdk/%.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 # Pwreset needs link with crypt

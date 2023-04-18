@@ -2,16 +2,24 @@
 #include <iostream> // cout, cerr
 #include <set>
 
-#include "hyde.h"
+#include <coroutine>
+
+#include "syscall_coroutine.h"
+#include "plugin_common.h"
+
+
+#include "hyde_sdk.h"
 #include "file_helpers.h"
 
 uint64_t counter = 0; 
 int N = -1; // Every N syscalls we'll run inject_getpid
 
+
+#if 0
 SyscallCoroutine inject_getpid(syscall_context* details) {
-  //printf("[INJECT before %lu]\n", details->orig_syscall->callno);
+  printf("[INJECT before %lu]\n", details->orig_syscall->callno);
   //dump_syscall(details->orig_syscall);
-  pid_t pid = yield_syscall0(details, getpid);
+  pid_t pid = yield_syscall(details, getpid);
   //printf("%lx (%d): wants to run %lu - coopted\n", details->asid, pid, details->orig_syscall->callno);
 
   co_yield *(details->orig_syscall);
@@ -29,34 +37,20 @@ void __attribute__ ((constructor)) setup(void) {
 }
 
 void __attribute__ ((destructor)) teardown(void) {
-  std::cout << "Total number of syscalls: " << counter << std::endl;
+  std::cerr << "Total number of syscalls: " << counter << std::endl;
+}
+#endif
+
+SyscallCoroutine inject_getpid(syscall_context* ctx) {
+  printf("PID: %ld\n", yield_syscall(ctx, getpid));
+  co_yield *ctx->get_orig_syscall();
+  co_return ExitStatus::SUCCESS;
 }
 
-// set of syscalls we've coopted
-std::set<long unsigned int> coopted_syscalls;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  //all_syscalls = &inject_getpid;
+  //printf("Set all syscalls at %p to %p\n", &all_syscalls, &inject_getpid);
+  map[SYS_geteuid] = inject_getpid;
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-
-  if ((counter++ % N) == 0) {
-    // TODO: exit and vfork can't be injected before??
-    // fork makes sense - child will start modified and un-coopted? Maybe? I'm not so sure anymore.
-    // shouldn't the parent be all cleaned up before the fork happens?
-    /*
-    if (callno == SYS_exit_group || 
-        callno == SYS_vfork || 
-        callno == SYS_exit || 
-        callno == SYS_clone || 
-        callno == SYS_fork)
-          return NULL;
-    */
-
-    // Only inject in a few, make sure they work
-    // Just 1 - works
-    if (callno == 0) return &inject_getpid;
-  }
-
-  //printf("%x: wants to run %lu - allowed\n", asid, callno);
-
-  return NULL;
+  return true;
 }

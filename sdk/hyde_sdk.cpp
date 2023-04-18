@@ -1,6 +1,4 @@
-// Non-KVM code to use with HyDE programs
-
-#include "hyde.h"
+#include "hyde_sdk.h"
 
 #define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
 
@@ -15,11 +13,11 @@ SyscCoroHelper ga_memcpy_one(syscall_context* r, void* out, uint64_t gva, size_t
 
   uint64_t hva = 0;
 
-  if (!translate_gva(r, gva, &hva)) {
+  if (!r->translate_gva(gva, &hva)) {
       yield_syscall_raw(r, access, (uint64_t)gva, 0);
-      if (!translate_gva(r, gva, &hva)) {
+      if (!r->translate_gva(gva, &hva)) {
         yield_syscall_raw(r, access, (uint64_t)gva, 0); // Try again
-        if (!translate_gva(r, gva, &hva)) {
+        if (!r->translate_gva(gva, &hva)) {
           co_return -1; // Failure, even after two retries?
         }
       }
@@ -132,11 +130,11 @@ SyscCoroHelper ga_memwrite(syscall_context* r, uint64_t _gva, void* in, size_t s
   gva += (__u64)_gva;
   assert(size != 0);
 
-  if (!translate_gva(r, gva, &hva)) {
+  if (!r->translate_gva(gva, &hva)) {
       int rv = yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
-      if (!translate_gva(r, gva, &hva)) {
+      if (!r->translate_gva(gva, &hva)) {
         yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
-        if (!translate_gva(r, gva, &hva)) {
+        if (!r->translate_gva(gva, &hva)) {
           co_return -1; // Failure, even after double retry
         }
       }
@@ -154,39 +152,23 @@ SyscCoroHelper ga_map(syscall_context* r,  uint64_t gva, void** host, size_t min
   //at host[0], and host[min_size] after mapping. If not, fail?
   // TODO how to handle failures here?
 
-  uint64_t gpa = kvm_translate(r->cpu, gva); // Guest physical addr
+  uint64_t gpa;
 
-  if (gpa == -1) {
+  if (!r->translate_gva(gva, &gpa)) {
     // Translation failed on base address - not in our TLB, maybe paged out
-      // Inject access syscall, forcing guest kernel to page it in with no other side effects
-      yield_syscall_raw(r, access, gva, 0);
-      // Now retry
-      gpa = kvm_translate(r->cpu, gva);
-      if (gpa == -1) {
-        printf("ga_map double fails for %lx\n", gva);
-        co_return -1; // Failure!
-      }
+    // Inject access syscall, forcing guest kernel to page it in with no other side effects
+    yield_syscall_raw(r, access, gva, 0);
+    // Now retry
+    if (!r->translate_gva(gva, &gpa)) {
+      printf("ga_map double fails for %lx\n", gva);
+      co_return -1; // Failure!
+    }
   }
 
   // Translation has succeeded, we have the guest physical address
   // Now translate that to the host virtual address
   uint64_t hva;
-  assert(kvm_host_addr_from_physical_memory_ext(gpa, &hva) == 1);
+  assert(r->gpa_to_hva(gpa, &hva));
   (*host) = (void*)hva;
-
   co_return 0;
-}
-
-int get_arg(syscall_context* details, RegIndex idx) {
-  // New interface that beats get_regs_or_die,
-  // note this gets args from the *original* state
-  // pre-injection, so if you start messing with
-  // those you might see changed results?:w
-  return get_arg(details->orig_regs, idx);
-}
-
-
-void set_retval(syscall_context* details, int retval) {
-  details->orig_syscall->retval = retval;
-  details->orig_syscall->has_retval = true;
 }

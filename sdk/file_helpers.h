@@ -3,7 +3,7 @@
 // for O_RDONLY
 #include <fcntl.h>
 
-#include "hyde.h"
+#include "hyde_sdk.h"
 #define PATH_LENGTH 256
 
 

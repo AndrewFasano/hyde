@@ -1,4 +1,3 @@
-#include "hyde.h"
 #include "file_helpers.h"
 // .tpp file to keep implementation out of header,
 // but to indicate that this is a template file, built as
