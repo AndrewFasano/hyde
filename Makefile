@@ -3,7 +3,7 @@
 # I'm getting internal compiler errors now so let's give clang a shot!
 
 CXX=clang++-15
-CFLAGS=-g -I../qemu/accel/kvm/ -I./hyde/ -std=c++20 -Wno-deprecated-declarations
+CFLAGS=-g -I../qemu/hyde/include/ -I./hyde/ -std=c++20 -Wno-deprecated-declarations
 SO_CFLAGS=-fPIC -shared $(CFLAGS)
 LDFLAGS=-fuse-ld=lld
 
