@@ -27,6 +27,17 @@ SyscallCoroutine inject_getpid(syscall_context* details) {
   co_return ExitStatus::SUCCESS;
 }
 
+#endif
+
+SyscallCoroutine inject_getpid(syscall_context* ctx) {
+  if (counter++ % N != 0) {
+    yield_syscall(ctx, getpid);
+  }
+
+  co_yield *ctx->get_orig_syscall();
+  co_return ExitStatus::SUCCESS;
+}
+
 void __attribute__ ((constructor)) setup(void) {
     if (getenv("N") != NULL && atoi(getenv("N")) != 0) {
       N = atoi(getenv("N"));
@@ -39,18 +50,12 @@ void __attribute__ ((constructor)) setup(void) {
 void __attribute__ ((destructor)) teardown(void) {
   std::cerr << "Total number of syscalls: " << counter << std::endl;
 }
-#endif
 
-SyscallCoroutine inject_getpid(syscall_context* ctx) {
-  printf("PID: %ld\n", yield_syscall(ctx, getpid));
-  co_yield *ctx->get_orig_syscall();
-  co_return ExitStatus::SUCCESS;
-}
-
-extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map, create_coopter_t catch_all) {
   //all_syscalls = &inject_getpid;
   //printf("Set all syscalls at %p to %p\n", &all_syscalls, &inject_getpid);
-  map[SYS_geteuid] = inject_getpid;
+  //map[SYS_geteuid] = inject_getpid;
+  catch_all = inject_getpid;
 
   return true;
 }
