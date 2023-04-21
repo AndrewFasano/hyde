@@ -15,25 +15,13 @@ uint64_t counter = 0;
 int N = -1; // Every N syscalls we'll run inject_getpid
 
 
-#if 0
-SyscallCoroutine inject_getpid(syscall_context* details) {
-  printf("[INJECT before %lu]\n", details->orig_syscall->callno);
-  //dump_syscall(details->orig_syscall);
-  pid_t pid = yield_syscall(details, getpid);
-  //printf("%lx (%d): wants to run %lu - coopted\n", details->asid, pid, details->orig_syscall->callno);
-
-  co_yield *(details->orig_syscall);
-  //printf("\toriginal syscall returns: %ld\n", details->last_sc_retval);
-  co_return ExitStatus::SUCCESS;
-}
-
-#endif
-
 SyscallCoroutine inject_getpid(syscall_context* ctx) {
-  if (counter++ % N != 0) {
-    yield_syscall(ctx, getpid);
+  //printf("CORO init with ctx %p\n", ctx);
+  if (counter++ % N == 0) {
+    int rv = yield_syscall(ctx, getpid);
   }
 
+  //printf("CORO yield: %lu for ctx %p\n", ctx->get_orig_syscall()->callno, ctx);
   co_yield *ctx->get_orig_syscall();
   co_return ExitStatus::SUCCESS;
 }
@@ -51,11 +39,8 @@ void __attribute__ ((destructor)) teardown(void) {
   std::cerr << "Total number of syscalls: " << counter << std::endl;
 }
 
-extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map, create_coopter_t catch_all) {
-  //all_syscalls = &inject_getpid;
-  //printf("Set all syscalls at %p to %p\n", &all_syscalls, &inject_getpid);
-  //map[SYS_geteuid] = inject_getpid;
-  catch_all = inject_getpid;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[-1] = inject_getpid;
 
   return true;
 }
