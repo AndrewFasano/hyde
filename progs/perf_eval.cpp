@@ -15,13 +15,10 @@ int N = -1; // Every N syscalls we'll run inject_getpid
 
 
 SyscallCoroutine inject_getpid(SyscallCtx* ctx) {
-  //printf("CORO init with ctx %p\n", ctx);
   if (counter++ % N == 0) {
-    //printf("GETPID\n");
     int rv = yield_syscall(ctx, getpid);
   }
 
-  //printf("CORO yield: %lu for ctx %p\n", ctx->get_orig_syscall()->callno, ctx);
   co_yield *ctx->get_orig_syscall();
   co_return ExitStatus::SUCCESS;
 }

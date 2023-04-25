@@ -4,16 +4,14 @@
 #include <string>
 #include <sys/mman.h> // for mmap flags
 #include <vector>
-#include "hyde.h"
+#include "hyde_common.h"
+#include "hyde_sdk.h"
 
 
-SyscallCoroutine pre_exec(syscall_context* details) {
+SyscallCoroutine pre_exec(SyscallCtx* details) {
+
   // Environment to inject - hardcoded in here for now
   std::string inject = "HyDE_var=HyDE_val";
-
-  // Get guest registers so we can examine the first argument
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
@@ -23,16 +21,7 @@ SyscallCoroutine pre_exec(syscall_context* details) {
 
 
   // Create guest and host envp references and use to read arguments out
-
-  #if 0
-  // Debug: print program name after reading it out of memory (sanity check)
-  char progname[128];
-  if (yield_from(ga_memread, details, progname, (ga*)get_arg(regs, 0), sizeof(progname)) != -1) {
-    printf("Execve is launching %s\n", progname);
-  }
-  #endif
-
-  uint64_t *guest_envp = (uint64_t*)get_arg(regs, (RegIndex)2); // Guest pointer
+  uint64_t *guest_envp = (uint64_t*)details->get_arg(2);
 
   for (int i=0; i < 255; i++) {
     uint64_t envp;
@@ -120,10 +109,10 @@ SyscallCoroutine pre_exec(syscall_context* details) {
   }
 
   // Finally, update the original (execve) syscall so arg2 points to our buffer
-  details->orig_syscall->args[2].value = (uint64_t)guest_buf;
+  details->set_arg(2, guest_buf);
 
   // Inject the modified syscall, then be done
-  co_yield *(details->orig_syscall); // noreturn
+  co_yield *(details->get_orig_syscall()); // noreturn, it's an execve
   co_return ExitStatus::SUCCESS;
 
 
@@ -131,14 +120,11 @@ cleanup_buf: // We have failed after allocating memory, clean it up
   //printf("[EnvMgr] Deallocate buffer at %llx for error\n", (__u64)injected_arg);
   yield_syscall(details, munmap, injected_arg, 1024);
 
-  co_yield *(details->orig_syscall); // noreturn
+  co_yield *(details->get_orig_syscall()); // noreturn
   co_return ExitStatus::SINGLE_FAILURE;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-  // We inject syscalls starting at every execve
-  if (callno == SYS_execve)
-    return &pre_exec;
-  return NULL;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[SYS_execve] = pre_exec;
+  return true;
 }
