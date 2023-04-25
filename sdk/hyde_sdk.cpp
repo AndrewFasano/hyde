@@ -6,7 +6,7 @@
 /*
  * Copy size bytes from a guest virtual address into a host buffer.
  */
-SyscCoroHelper ga_memcpy_one(syscall_context* r, void* out, uint64_t gva, size_t size) {
+SyscCoroHelper ga_memcpy_one(SyscallCtx* r, void* out, uint64_t gva, size_t size) {
   // We wish to read size bytes from the guest virtual address space
   // and store them in the buffer pointed to by out. If out is NULL,
   // we allocate it
@@ -32,7 +32,7 @@ SyscCoroHelper ga_memcpy_one(syscall_context* r, void* out, uint64_t gva, size_t
 /* Memread will copy guest data to a host buffer, paging in memory as needed.
  * It's an alias for ga_memcpy but that might go away later in favor of this name.
  */
-SyscCoroHelper ga_memread(syscall_context* r, void* out, uint64_t gva_base, size_t size) {
+SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva_base, size_t size) {
   co_return yield_from(ga_memcpy, r, out, gva_base, size);
 }
 
@@ -41,7 +41,7 @@ SyscCoroHelper ga_memread(syscall_context* r, void* out, uint64_t gva_base, size
  * translation requests as necessary, guaranteed to work so long as address through
  * address + size are mappable
  */
-SyscCoroHelper ga_memcpy(syscall_context* r, void* out, uint64_t gva_base, size_t size) {
+SyscCoroHelper ga_memcpy(SyscallCtx* r, void* out, uint64_t gva_base, size_t size) {
 
   uint64_t gva_end = (uint64_t)((uint64_t)gva_base + size);
   uint64_t gva_start_page = (uint64_t)gva_base  & ~(PAGE_SIZE - 1);
@@ -123,7 +123,7 @@ SyscCoroHelper ga_memcpy(syscall_context* r, void* out, uint64_t gva_base, size_
 
 /* Given a host buffer, write it to a guest virtual address. The opposite
  * of ga_memcpy */
-SyscCoroHelper ga_memwrite(syscall_context* r, uint64_t _gva, void* in, size_t size) {
+SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t _gva, void* in, size_t size) {
   // TODO: re-issue translation requests as necessary
   uint64_t hva;
   __u64 gva = 0;
@@ -145,7 +145,7 @@ SyscCoroHelper ga_memwrite(syscall_context* r, uint64_t _gva, void* in, size_t s
   co_return 0;
 }
 
-SyscCoroHelper ga_map(syscall_context* r,  uint64_t gva, void** host, size_t min_size) {
+SyscCoroHelper ga_map(SyscallCtx* r,  uint64_t gva, void** host, size_t min_size) {
   // Set host to a host virtual address that maps to the guest virtual address gva
 
   // TODO: Assert that gva+0 and gva+min_size can both be reached

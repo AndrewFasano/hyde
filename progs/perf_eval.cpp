@@ -5,8 +5,7 @@
 #include <coroutine>
 
 #include "syscall_coroutine.h"
-#include "plugin_common.h"
-
+#include "hyde_common.h"
 
 #include "hyde_sdk.h"
 #include "file_helpers.h"
@@ -15,9 +14,10 @@ uint64_t counter = 0;
 int N = -1; // Every N syscalls we'll run inject_getpid
 
 
-SyscallCoroutine inject_getpid(syscall_context* ctx) {
+SyscallCoroutine inject_getpid(SyscallCtx* ctx) {
   //printf("CORO init with ctx %p\n", ctx);
   if (counter++ % N == 0) {
+    //printf("GETPID\n");
     int rv = yield_syscall(ctx, getpid);
   }
 
@@ -36,7 +36,7 @@ void __attribute__ ((constructor)) setup(void) {
 }
 
 void __attribute__ ((destructor)) teardown(void) {
-  std::cerr << "Total number of syscalls: " << counter << std::endl;
+  std::cerr << "[Perf_eval]: Observed " << counter << ". guest syscalls. Injected getpid between every " << N << "." << std::endl;
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
