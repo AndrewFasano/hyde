@@ -9,7 +9,9 @@
 #include <unistd.h>
 #include <thread>
 
-#include "hyde.h"
+#include "hyde_sdk.h"
+#include "hyde_common.h"
+
 bool alive = true;
 bool wait_for_oob_validate = false;
 bool validated = false;
@@ -26,7 +28,7 @@ std::string pending_proc;
 int pending_pid = -1;
 time_t last_resp_time = 0; 
 
-SyscCoroHelper stall_for_input(syscall_context* details, int pid) {
+SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
   // Block until user input. We should inject sleeps in the guest but eh.
   if (pid == pending_pid && time(NULL) - last_resp_time < 5) {
     // Don't prompt for the same process too often
@@ -55,18 +57,16 @@ SyscCoroHelper stall_for_input(syscall_context* details, int pid) {
   co_return (validated) ? 0 : -1;
 }
 
-SyscallCoroutine validate(syscall_context* details) {
+SyscallCoroutine validate(SyscallCtx* details) {
   // sudo is a suid binary, so it's running with an EUID of 0.
   // can we get the original value though?
 
   // Get arguments
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
-  int real = get_arg(regs, RegIndex::ARG0); 
-  int effective = get_arg(regs, RegIndex::ARG1); 
-  int saved = get_arg(regs, RegIndex::ARG2); 
+  int real = details->get_arg(0);
+  int effective = details->get_arg(1);
+  int saved = details->get_arg(2);
 
-  int pid = yield_syscall0(details, getpid);
+  int pid = yield_syscall(details, getpid);
 
   // if we're switching anything to 0, we care
   if (real == 0 || effective == 0 || saved == 0) {
@@ -88,14 +88,17 @@ SyscallCoroutine validate(syscall_context* details) {
     //   << " to (" << real << ", " << effective << ", " << saved << ")" << std::endl;
 
     if (yield_from(stall_for_input, details, pid) == -1) {
-      set_arg(regs, RegIndex::ARG0, -1u);
-      set_arg(regs, RegIndex::ARG1, -1u);
-      set_arg(regs, RegIndex::ARG2, -1u);
+      std::cout << "BLOCKING " << pending_proc << " (" << pid << ")" << std::endl;
+      details->get_orig_syscall()->set_arg(0, -1u);
+      details->get_orig_syscall()->set_arg(1, -1u);
+      details->get_orig_syscall()->set_arg(2, -1u);
     }
-
   }
 
-  co_yield *(details->orig_syscall);
+  std::cout << "Go go go: " << std::endl;
+  details->get_orig_syscall()->pprint();
+
+  co_yield *(details->get_orig_syscall());
   co_return ExitStatus::SUCCESS;
 }
 
@@ -179,16 +182,29 @@ void handle_input(int sockfd) {
   }
 }
 
+
 std::thread *t = NULL;
-void __attribute__ ((constructor)) setup(void) {
+void __attribute__ ((destructor)) teardown(void) {
+  alive = false;
+  if (t != NULL && t->joinable()) {
+    t->join();
+  }
+}
+
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  srand(time(NULL));
+  map[SYS_setresuid] = validate;
+  map[SYS_setresgid] = validate;
+
     // Create a listening socket and launch a thread to handle connections
     int port = 4444;
     if (getenv("TWOFA_PORT") != NULL && atoi(getenv("TWOFA_PORT")) != 0) {
       port = atoi(getenv("TWOFA_PORT"));
     } else {
-      printf("WARN: environ var TWOGA_PORT not set using default %d\n", port);
+      printf("WARN: environ var TWOFA_PORT not set using default %d\n", port);
     }
     int sockfd = bind_and_listen(port);
+    if (sockfd < 0) return false;
 
     std::thread t1(handle_input, sockfd);
     // We have to detach the thread, otherwise it will think it was abandoned and terminate
@@ -196,18 +212,5 @@ void __attribute__ ((constructor)) setup(void) {
 
     // But we need to keep a reference to it so we can join it on shutdown
     t = &t1;
-}
-
-void __attribute__ ((destructor)) teardown(void) {
-  alive = false;
-}
-
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-/*
-       int setresuid(uid_t ruid, uid_t euid, uid_t suid);
-       int setresgid(gid_t rgid, gid_t egid, gid_t sgid);
-*/
-  if (callno == SYS_setresuid || callno == SYS_setresgid) return &validate;
-  return NULL;
+    return true;
 }

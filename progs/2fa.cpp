@@ -8,10 +8,13 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <thread>
+#include <mutex>
 
-#include "hyde.h"
+#include "hyde_common.h"
 bool alive = true;
 bool validated = false;
+
+std::mutex mtx;
 
 // When a process tries to switch it's UID/GID to 0, we output a code
 // from the VMM and require the user to type it
@@ -41,27 +44,57 @@ time_t last_resp_time = 0;
 #endif
 
 
-SyscCoroHelper stall_for_input(syscall_context* details, int pid) {
+SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
   // If we've already validated this process, don't prompt again, just return same
   if (pid == pending_pid && time(NULL) - last_resp_time < 10) {
     // Don't prompt for the same process too often
     co_return (validated) ? 0 : -1;
   }
 
+  // If two processes are concurrently asking to escalate, we can only prompt a user for one at a time
+  while (!mtx.try_lock()) {
+    struct timespec ts;
+    ts.tv_sec = 1;
+    ts.tv_nsec = 0; //100000000; // 100ms
+    printf("Stall %d for 1s while waiting on user to answer another prompt\n", pid);
+    yield_syscall(details, nanosleep, &ts);
+  }
+  printf("GOT MUTEX IN %d\n", pid);
+
+  // We need STDIN/STDOUT handles - might not have them so we get our own??
+  int g_stdin = yield_syscall(details, open, "/dev/stdin", O_RDONLY);
+  int g_stdout = yield_syscall(details, open, "/dev/stdout", O_WRONLY);
+
+
   while (1) {
     // Generate a 6 digit random value - print on VMM
     int code = rand() % 1000000;
-    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Code: " << code << std::endl;
+    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Interacting with FDs " << g_stdout << " and " << g_stdin << ". Code: " << code << std::endl;
 
     const char prompt[] = "2FA: Enter code to allow process to run as root (or press enter to cancel): ";
     char response[100];
     // Print the prompt in the guest with yield_syscall, then get a response
     // from the user with yield_from. This is a bit hacky, but it works.
-    yield_syscall(details, write, 1, prompt, sizeof(prompt));
-    yield_syscall(details, read, 0, response, sizeof(response));
+    int bytes_written = yield_syscall(details, write, g_stdout, prompt, sizeof(prompt));
+    int bytes_read = yield_syscall(details, read, g_stdin, response, sizeof(response));
     // Can we make this read timeout?
 
-    std::cout << "[2FA VMM] Got response: " << response << std::endl;
+    char outbuf[100] = {0};
+    char inbuf[100] = {0};
+
+    snprintf(inbuf, 100, "/proc/self/fds/%d", 0);
+    int rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
+    printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
+
+    snprintf(inbuf, 100, "/proc/self/fds/%d", g_stdin);
+    rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
+    printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
+
+
+    printf("Wrote %d, read %d\n", bytes_written, bytes_read);
+    assert(bytes_read != sizeof(response)); // XXX Testing - this is probalby a bug?
+
+    std::cout << "[2FA VMM] Got response " << bytes_read << ": " << response << std::endl;
     int resp_code = atoi(response);
 
     if (resp_code == -1) {
@@ -82,29 +115,32 @@ SyscCoroHelper stall_for_input(syscall_context* details, int pid) {
     }
   }
 
+  mtx.unlock();
+
+  yield_syscall(details, close, g_stdin);
+  yield_syscall(details, close, g_stdout);
+
   co_return (validated) ? 0 : -1;
 }
 
-SyscallCoroutine validate(syscall_context* details) {
+SyscallCoroutine validate(SyscallCtx* details) {
   // sudo is a suid binary, so it's running with an EUID of 0.
   // can we get the original value though?
 
   // Get arguments
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
-  int real = get_arg(regs, RegIndex::ARG0); 
-  int effective = get_arg(regs, RegIndex::ARG1); 
-  int saved = get_arg(regs, RegIndex::ARG2); 
+  int real = details->get_arg(0);
+  int effective = details->get_arg(1);
+  int saved = details->get_arg(2);
 
-  int pid = yield_syscall0(details, getpid);
+  int pid = yield_syscall(details, getpid);
 
   // if we're switching anything to 0, we care
   if (real == 0 || effective == 0 || saved == 0) {
     // Maybe procfs to get original command?
     const char path[] = "/proc/self/cmdline";
     std::string buffer;
+
     int buffer_size = yield_from(read_file, details, path, &buffer);
-    
     // Replace null bytes in buffer string with spaces up to buffer_size
     for (int i = 0; i < buffer_size; i++) {
       if (buffer[i] == '\0') buffer[i] = ' ';
@@ -112,29 +148,34 @@ SyscallCoroutine validate(syscall_context* details) {
 
     pending_proc = buffer;
 
-    // Request interactive user input. Have guest stall while we wait for input.
-    //std::cout << "[2FA] Guest process " << buffer << " attempt changing " << 
-    //  (get_arg(regs, RegIndex::CALLNO) == SYS_setresuid ? "uid" : "gid")
-    //   << " to (" << real << ", " << effective << ", " << saved << ")" << std::endl;
+    // TEST
+    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root" << std::endl;
 
+    const char prompt[] = "Press enter to continue it, along with a message: ";
+    char response[100];
+    // Print the prompt in the guest with yield_syscall, then get a response
+    // from the user with yield_from. This is a bit hacky, but it works.
+    int bytes_written = yield_syscall(details, write, STDOUT_FILENO, prompt, sizeof(prompt));
+    int bytes_read = yield_syscall(details, read, STDIN_FILENO, response, sizeof(response));
+    printf("WROTE %d read %d: %s\n", bytes_written, bytes_read, response);
+    // END TEST
+
+#if 0
     if (yield_from(stall_for_input, details, pid) == -1) {
-      set_arg(regs, RegIndex::ARG0, -1u);
-      set_arg(regs, RegIndex::ARG1, -1u);
-      set_arg(regs, RegIndex::ARG2, -1u);
+      details->get_orig_syscall()->set_arg(0, -1u);
+      details->get_orig_syscall()->set_arg(1, -1u);
+      details->get_orig_syscall()->set_arg(2, -1u);
     }
-
+#endif
   }
 
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall());
   co_return ExitStatus::SUCCESS;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-/*
-       int setresuid(uid_t ruid, uid_t euid, uid_t suid);
-       int setresgid(gid_t rgid, gid_t egid, gid_t sgid);
-*/
-  if (callno == SYS_setresuid || callno == SYS_setresgid) return &validate;
-  return NULL;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  srand(time(NULL));
+  map[SYS_setresuid] = validate;
+  map[SYS_setresgid] = validate;
+  return true;
 }
