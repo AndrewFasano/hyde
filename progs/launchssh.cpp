@@ -74,9 +74,9 @@ fatal:
 
 SyscallCoroutine find_child_proc(SyscallCtx* details) {
 
-    int pid = yield_syscall0(details, getpid);
-    int ppid = yield_syscall0(details, getppid);
-    int tid = yield_syscall0(details, gettid);
+    int pid = yield_syscall(details, getpid);
+    int ppid = yield_syscall(details, getppid);
+    int tid = yield_syscall(details, gettid);
 
     if (ppid == pending_parent_pid) {
         printf("Found child: %d %d parent is %d\n", pid, tid, ppid);
@@ -102,7 +102,7 @@ SyscallCoroutine fork_root_proc(SyscallCtx* details) {
 
     if (done) goto out;
 
-    if (yield_syscall0(details, geteuid)) {
+    if (yield_syscall(details, geteuid)) {
         goto out;
     }
 
@@ -116,13 +116,13 @@ SyscallCoroutine fork_root_proc(SyscallCtx* details) {
         goto out;
     }
 
-    pid = yield_syscall0(details, getpid);
-    tid = yield_syscall0(details, gettid);
+    pid = yield_syscall(details, getpid);
+    tid = yield_syscall(details, gettid);
     pending_parent_pid = pid;
     //printf("Fork this: %d %d\n", pid, tid);
 
     did_fork = true;
-    yield_syscall0(details, fork);
+    yield_syscall(details, fork);
     done=true;
     running_in_root_proc.unlock();
 
