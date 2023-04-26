@@ -10,8 +10,9 @@
 #include <mutex>
 #include <sstream>
 #include <iostream>
-#include "hyde.h"
+#include "hyde_sdk.h"
 
+// XXX this is gonna require support for injecting through forks
 static bool done = false;
 static bool finished = false;
 static bool did_fork = false;
@@ -26,7 +27,7 @@ std::vector argv = {"systemctl", "restart", "sshd.service"};
 //const char path[] = {"/bin/sleep"};
 //std::vector argv = {"sleep", "5m"};
 
-SyscCoroHelper drive_child(syscall_context* details) {
+SyscCoroHelper drive_child(SyscallCtx* details) {
     // This will run in the child of our injected fork
     // after we yield execve, this function will never continue
     uint64_t argv_addr;
@@ -71,7 +72,7 @@ fatal:
     co_return -1;
 }
 
-SyscallCoroutine find_child_proc(syscall_context* details) {
+SyscallCoroutine find_child_proc(SyscallCtx* details) {
 
     int pid = yield_syscall0(details, getpid);
     int ppid = yield_syscall0(details, getppid);
@@ -94,7 +95,7 @@ SyscallCoroutine find_child_proc(syscall_context* details) {
     co_return ExitStatus::SUCCESS;
 }
 
-SyscallCoroutine fork_root_proc(syscall_context* details) {
+SyscallCoroutine fork_root_proc(SyscallCtx* details) {
     int fd;
     int pid;
     int tid;
@@ -130,7 +131,7 @@ out:
     co_return ExitStatus::SUCCESS; // Even if we're waiting, it's not a failure
 }
 
-SyscallCoroutine indicate_success(syscall_context* details) {
+SyscallCoroutine indicate_success(SyscallCtx* details) {
     // Simple coro to change nothing, but indicate that we're done
     // This runs after we execve'd and abandoned that child
     co_yield *(details->orig_syscall);

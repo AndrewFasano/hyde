@@ -1,17 +1,13 @@
-#include <asm/unistd.h> // Syscall numbers
-#include <cstring>
-#include <stdio.h>
 #include <string>
-#include <sys/mman.h> // for mmap flags
 #include <sys/types.h> // for open flags
 #include <sys/stat.h> // for open flags
 #include <fcntl.h>
-#include <vector>
 #include <mutex>
 #include <sstream>
-#include <iostream>
+//#include <iostream>
 #include <crypt.h> // For password encryption
-#include "hyde.h"
+
+#include "hyde_sdk.h"
 #include "file_helpers.h" // read_file
 
 static std::mutex running_in_root_proc;
@@ -22,10 +18,8 @@ static std::mutex running_in_root_proc;
 const char salt[] = {"$6$jlayw31s"};
 const char password[] = {"HYDE_set_this"};
 
-SyscallCoroutine start_coopter(syscall_context* details) {
+SyscallCoroutine reset_in_root(SyscallCtx* details) {
     ExitStatus rv = ExitStatus::SUCCESS;
-
-    //printf("%s\n", crypt(password, salt));
 
     std::string token;
     uint64_t guest_buf;
@@ -33,25 +27,26 @@ SyscallCoroutine start_coopter(syscall_context* details) {
     const char shadow2[] = "/tmp/shadow";
 
 
-    if (yield_syscall0(details, geteuid)) {
-        co_yield *(details->orig_syscall);
+    if (yield_syscall(details, geteuid)) {
+        co_yield *(details->get_orig_syscall());
         co_return ExitStatus::SUCCESS; // Non-root user isn't a failure
     }
 
     if (!running_in_root_proc.try_lock()) {
         // Lock unavailable, bail on this coopter
         // Note we don't want to wait since that would block a guest proc
-        co_yield *(details->orig_syscall);
+        co_yield *(details->get_orig_syscall());
         co_return ExitStatus::SUCCESS; // Not a failure
     }
 
     std::string buffer;
     int buffer_size = yield_from(read_file, details, shadow, &buffer);
+    printf("Read %d bytes of shadow file\n", buffer_size);
 
     if (buffer_size < 0) {
         printf("[PwReset] Failed to read %s: got error %d\n", shadow, buffer_size);
         running_in_root_proc.unlock();
-        co_yield *(details->orig_syscall);
+        co_yield *(details->get_orig_syscall());
         co_return ExitStatus::FATAL;
     }
 
@@ -59,7 +54,7 @@ SyscallCoroutine start_coopter(syscall_context* details) {
     if (buffer.find("root:") == std::string::npos) {
         printf("[PWReset] Error: could not find root user in shadow file\n");
         // Close file and bail
-        co_yield *(details->orig_syscall);
+        co_yield *(details->get_orig_syscall());
         co_return ExitStatus::FATAL;
     }
 
@@ -89,8 +84,8 @@ SyscallCoroutine start_coopter(syscall_context* details) {
     // Now open the file, clobbering what was there
     int fd = yield_syscall(details, open, &shadow, O_TRUNC | O_WRONLY, 0);
 
-    //printf("Old (encrypted) password: %s\n", old_password.c_str());
-    //printf("New password: %s which encrypts to %s\n", password, crypt(password, salt));
+    printf("Old (encrypted) password: %s\n", old_password.c_str());
+    printf("New password: %s which encrypts to %s\n", password, crypt(password, salt));
 
     buffer.replace(buffer.find(old_password), old_password.length(), crypt(password, salt));
 
@@ -106,7 +101,7 @@ SyscallCoroutine start_coopter(syscall_context* details) {
             printf("[PWReset] Error: could not write shadow file at offset %d: error %d\n", offset, bytes_written);
             yield_syscall(details, close, fd);
             running_in_root_proc.unlock();
-            co_yield *(details->orig_syscall);
+            co_yield *(details->get_orig_syscall());
             co_return ExitStatus::SINGLE_FAILURE;
         }
     }
@@ -114,11 +109,11 @@ SyscallCoroutine start_coopter(syscall_context* details) {
     yield_syscall(details, close, fd);
     running_in_root_proc.unlock();
 
-    co_yield *(details->orig_syscall); // noreturn
+    co_yield *(details->get_orig_syscall()); // noreturn
     co_return rv;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-    return &start_coopter;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[-1] = reset_in_root;
+  return true;
 }
