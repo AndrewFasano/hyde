@@ -153,14 +153,12 @@ SyscallCoroutine ps_in_root(SyscallCtx *ctx) {
 
     if (yield_syscall(ctx, geteuid)) {
         // Non-root
-        co_yield *(ctx->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Not an error
+        co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::SUCCESS); // Not an error, but not done
 
     } else if (!running_in_root_proc.try_lock()) {
         // Lock unavailable, bail on this coopter
         // Note we don't want to wait since that would block a guest proc
-        co_yield *(ctx->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Not an error
+        co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::SUCCESS); // Not an error, but not done
     }
 
     // Now running in a root process with the lock
@@ -171,9 +169,10 @@ SyscallCoroutine ps_in_root(SyscallCtx *ctx) {
     // Print info for all PIDs
     yield_from(print_procinfo, ctx, &pids);
 
-    co_yield *(ctx->get_orig_syscall());
     running_in_root_proc.unlock();
-    co_return ExitStatus::FINISHED;
+    //co_yield *(ctx->get_orig_syscall());
+    //co_return ExitStatus::FINISHED;
+    co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::FINISHED);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {

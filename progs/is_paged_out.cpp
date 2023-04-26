@@ -52,8 +52,7 @@ SyscallCoroutine pre_open(SyscallCtx *details) {
     }
 #endif
 
-    co_yield *(details->get_orig_syscall());
-    co_return ExitStatus::SUCCESS;
+    co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
 void __attribute__ ((destructor)) teardown(void) {

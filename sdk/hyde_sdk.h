@@ -198,6 +198,11 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   rv;                                                                                                       \
 })
 
+#define co_yield_noreturn(details, syscall, retval) ({ \
+details->set_noreturn(retval); co_yield syscall; \
+co_return ExitStatus::FATAL; /* UNREACHABLE */ \
+})
+
 /* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */
 #define yield_syscall_raw(details, func, ...) ({         \
   co_yield unchecked_build_syscall<SYS_##func>(::func, 0, __VA_ARGS__); \
