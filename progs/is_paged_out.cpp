@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <string>
-#include "hyde.h"
 #include <iostream>
+#include "hyde_sdk.h"
+#include "qemu_api.h"
 
 // Read the pathname passed to all open/openat syscalls.
 // Count the total number of times we see those syscalls and
@@ -10,30 +11,26 @@
 
 // If BASELINE is defined, we don't use syscall injection,
 // otherwise we do.
-// #define BASELINE
+//#define BASELINE
 
 uint64_t failc = 0;
 uint64_t goodc = 0;
 
 // Before every open check if filename is paged out or not
-SyscallCoroutine start_coopter(syscall_context *details)
-{
-    struct kvm_regs regs;
-    get_regs_or_die(details, &regs);
-
+SyscallCoroutine pre_open(SyscallCtx *details) {
     // Open: path pointer is first argument
-    RegIndex path_arg = RegIndex::ARG0;
+    int path_arg = 0;
 
-    if (details->orig_syscall->callno == SYS_openat) {
+    if (details->get_orig_syscall()->callno == SYS_openat) {
         // openat: path pointer is second argument - we won't bother resolving dirfd
-        path_arg = RegIndex::ARG1;
+        path_arg = 1;
     }
 
-    uint64_t path_ptr = get_arg(regs, path_arg);
+    uint64_t path_ptr = details->get_arg(path_arg);
 
 #ifdef BASELINE
     uint64_t hva;
-    if (!translate_gva(details, path_ptr, &hva)) {
+    if (!details->translate_gva(path_ptr, &hva)) {
         failc++;
     } else {
         goodc++;
@@ -55,7 +52,7 @@ SyscallCoroutine start_coopter(syscall_context *details)
     }
 #endif
 
-    co_yield *(details->orig_syscall);
+    co_yield *(details->get_orig_syscall());
     co_return ExitStatus::SUCCESS;
 }
 
@@ -64,11 +61,8 @@ void __attribute__ ((destructor)) teardown(void) {
   std::cerr << "Success count: " << goodc << std::endl;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-
-  if (callno == SYS_openat || callno == SYS_open)
-      return &start_coopter;
-
-  return NULL;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[SYS_open] = pre_open;
+  map[SYS_openat] = pre_open;
+  return true;
 }
