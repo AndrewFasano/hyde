@@ -59,7 +59,6 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
     printf("Stall %d for 1s while waiting on user to answer another prompt\n", pid);
     yield_syscall(details, nanosleep, &ts);
   }
-  printf("GOT MUTEX IN %d\n", pid);
 
   // We need STDIN/STDOUT handles - might not have them so we get our own??
   int g_stdin = yield_syscall(details, open, "/dev/stdin", O_RDONLY);
@@ -69,7 +68,7 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
   while (1) {
     // Generate a 6 digit random value - print on VMM
     int code = rand() % 1000000;
-    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Interacting with FDs " << g_stdout << " and " << g_stdin << ". Code: " << code << std::endl;
+    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Code: " << code << std::endl;
 
     const char prompt[] = "2FA: Enter code to allow process to run as root (or press enter to cancel): ";
     char response[100];
@@ -82,6 +81,7 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
     char outbuf[100] = {0};
     char inbuf[100] = {0};
 
+  #if 0
     snprintf(inbuf, 100, "/proc/self/fds/%d", 0);
     int rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
     printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
@@ -89,12 +89,11 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
     snprintf(inbuf, 100, "/proc/self/fds/%d", g_stdin);
     rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
     printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
-
-
     printf("Wrote %d, read %d\n", bytes_written, bytes_read);
+  #endif
+
     assert(bytes_read != sizeof(response)); // XXX Testing - this is probalby a bug?
 
-    std::cout << "[2FA VMM] Got response " << bytes_read << ": " << response << std::endl;
     int resp_code = atoi(response);
 
     if (resp_code == -1) {
@@ -148,25 +147,11 @@ SyscallCoroutine validate(SyscallCtx* details) {
 
     pending_proc = buffer;
 
-    // TEST
-    std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root" << std::endl;
-
-    const char prompt[] = "Press enter to continue it, along with a message: ";
-    char response[100];
-    // Print the prompt in the guest with yield_syscall, then get a response
-    // from the user with yield_from. This is a bit hacky, but it works.
-    int bytes_written = yield_syscall(details, write, STDOUT_FILENO, prompt, sizeof(prompt));
-    int bytes_read = yield_syscall(details, read, STDIN_FILENO, response, sizeof(response));
-    printf("WROTE %d read %d: %s\n", bytes_written, bytes_read, response);
-    // END TEST
-
-#if 0
     if (yield_from(stall_for_input, details, pid) == -1) {
       details->get_orig_syscall()->set_arg(0, -1u);
       details->get_orig_syscall()->set_arg(1, -1u);
       details->get_orig_syscall()->set_arg(2, -1u);
     }
-#endif
   }
 
   co_yield *(details->get_orig_syscall());

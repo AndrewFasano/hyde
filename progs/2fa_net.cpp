@@ -95,9 +95,6 @@ SyscallCoroutine validate(SyscallCtx* details) {
     }
   }
 
-  std::cout << "Go go go: " << std::endl;
-  details->get_orig_syscall()->pprint();
-
   co_yield *(details->get_orig_syscall());
   co_return ExitStatus::SUCCESS;
 }

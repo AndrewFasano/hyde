@@ -15,7 +15,7 @@
 
 // Store mapping of filenames to sha1sums
 const std::vector<const char*> known_files = {"/usr/bin/sha1sum", "/lib/x86_64-linux-gnu/libc-2.27.so"};
-const std::vector<const char*> known_hashes = {"0648f41a6c74f78414a330c299fda56b1c4b327d", "18292bd12d37bfaf58e8dded9db7f1f5da1192cb"};
+const std::vector<const char*> known_hashes = {"e1468f91b7aaf27fab685abe9ae2fce5037a2f00", "18292bd12d37bfaf58e8dded9db7f1f5da1192cb"};
 
 #define BUF_SZ 1024 // Size to use for read chunks
 #define INTERNAL_ERROR -99999
@@ -191,7 +191,6 @@ SyscallCoroutine pre_execve(SyscallCtx* details) {
 
 SyscallCoroutine pre_mmap(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
-#if 0
   char lib_path[128];
 
   // fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
@@ -199,7 +198,6 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
   int fd = details->get_arg(4);
 
   if (!(flags & MAP_ANONYMOUS)) {
-    printf("DOIN STUFF\n");
     if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
       printf("[Attest] Unable to get filename for fd %d\n", fd);
       rv = ExitStatus::SINGLE_FAILURE;
@@ -215,7 +213,7 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
       } else if (hash_result < 0) {
         // Not our failure, leave RV as success
       } else {
-        //printf("[Attest] Mapped file %s with hash %s\n", lib_path, digest);
+        printf("[Attest] Mapped file %s with hash %s\n", lib_path, digest);
         if (!hash_match(lib_path, (char*)digest)) {
           printf("[Attest] BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
           details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
@@ -224,10 +222,8 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
       }
     }
   }
-#endif
 
   // yield original syscall
-  details->get_orig_syscall()->pprint();
   co_yield *(details->get_orig_syscall()); // If we yield a noreturn can we still get advanced just with a bogus RV? Didn't we try this before?
   co_return rv;
 }
