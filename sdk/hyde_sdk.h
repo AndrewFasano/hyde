@@ -44,8 +44,6 @@ inline int gettimeofday_(struct timeval *tv, struct timezone *tz) {
     return ::gettimeofday(tv, tz);
 }
 
-
-
 /* Yield_from runs a HydeCoro<hsyscall, uint>, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
 #define yield_from(f, ...) \
   ({ \
@@ -72,10 +70,6 @@ SyscCoroHelper ga_memcpy(SyscallCtx* r, void* out, uint64_t gva, size_t size);
 SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva, size_t size);
 SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t gva, void* in, size_t size);
 SyscCoroHelper ga_map(SyscallCtx* r, uint64_t gva, void** host, size_t min_size);
-
-// Just use details-> for now?
-//int get_arg(SyscallCtx* details, RegIndex idx);
-//void set_retval(SyscallCtx* details, int retval);
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
@@ -142,6 +136,7 @@ SyscCoroHelper map_args_to_guest_stack(SyscallCtx* details, uint64_t stack_addr,
   // Now look through pending->args and actually do the memory mappings
   for (int i = 0; i < pending->nargs; i++) {
     if (pending->args[i].is_ptr) {
+      //printf("Map arg %d: host %lx guest %lx\n", i, pending->args[i].value, pending->args[i].guest_ptr);
       if (yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size) != 0) {
         printf("FATAL: failed to memwrite argument %d into guest stack\n", i);
         co_return -1;
@@ -181,10 +176,11 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   uint64_t guest_stack = 0;                                                                                 \
   if (total_size > 0)                                                                                       \
   { /* We need some stack space for the arguments for this syscall. Allocate it! */                         \
-    /*printf("AUTO-ALLOCATE %d bytes (rounded up from %d)\n", padded_total_size, total_size);*/             \
+    /*printf("AUTO-ALLOCATE %ld bytes (rounded up from %ld)\n", padded_total_size, total_size);*/           \
     co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                             \
                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
-    guest_stack = details->get_result(); /* TODO: error checking?*/                                       \
+    guest_stack = details->get_result(); /* Is this assert good enough error checking? */                   \
+    assert((int64_t)guest_stack > 0 || (int64_t)guest_stack < -500);                                        \
   }                                                                                                         \
   hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                               \
   if (total_size > 0)                                                                                       \
@@ -193,7 +189,7 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
     yield_from(map_args_to_guest_stack, details, guest_stack, &s, arg_types_tup);                           \
   }                                                                                                         \
   co_yield s;                                                                                               \
-  auto rv = details->get_result();                                                                        \
+  auto rv = details->get_result();                                                                          \
   if (total_size > 0)                                                                                       \
   { /* We previously allocated some stack space for this syscall, sync it back, then free it */             \
     yield_from(map_args_from_guest_stack, details, guest_stack, &s, arg_types_tup);                         \
