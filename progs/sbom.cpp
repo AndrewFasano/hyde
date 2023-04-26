@@ -10,7 +10,7 @@
 #include <map>
 #include <openssl/sha.h>
 
-#include "hyde.h"
+#include "hyde_sdk.h"
 #include "file_helpers.h"
 
 #define BUF_SZ 1024 // Size to use for read chunks
@@ -18,7 +18,7 @@
 
 // Duplicated in attest.cpp
 template <std::size_t N>
-SyscCoroHelper hash_file(syscall_context *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
+SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
   // Hash a file at the specified pointer. write ascii digest into outbuf
   int rv = 0;
   std::string buffer;
@@ -77,19 +77,17 @@ SyscCoroHelper hash_file(syscall_context *details, char(&path)[N], unsigned char
   co_return rv;
 }
 
-SyscallCoroutine pre_execve_at(syscall_context* details) {
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
+SyscallCoroutine pre_execveat(SyscallCtx* details) {
   char full_path[256];
   int readlink_rv;
-  int fd = get_arg(regs, RegIndex::ARG0); 
+  int fd = details->get_arg(0);
   int hash_result;
 
   ExitStatus rv = ExitStatus::SUCCESS;
 
   // Read pathname from arg 1
   char path[256];
-  if (yield_from(ga_memread, details, path, get_arg(regs, RegIndex::ARG1), sizeof(path)) == -1) {
+  if (yield_from(ga_memread, details, path, details->get_arg(1), sizeof(path)) == -1) {
       printf("[SBOM] Unable to read filename\n");
       rv = ExitStatus::SINGLE_FAILURE;
       goto out;
@@ -128,16 +126,14 @@ SyscallCoroutine pre_execve_at(syscall_context* details) {
 
 out:
   // yield original syscall
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall());
   co_return rv;
 }
 
-SyscallCoroutine pre_execve(syscall_context* details) {
-  struct kvm_regs regs;
+SyscallCoroutine pre_execve(SyscallCtx* details) {
   char path[256];
   ExitStatus rv = ExitStatus::SUCCESS;
-  get_regs_or_die(details, &regs);
-  uint64_t path_ptr = get_arg(regs, RegIndex::ARG0); 
+  uint64_t path_ptr = details->get_arg(0);
 
   if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
       printf("[SBOM] Unable to read filename at %lx\n", path_ptr);
@@ -158,19 +154,17 @@ SyscallCoroutine pre_execve(syscall_context* details) {
   }
 
   // yield original syscall
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall());
   co_return rv;
 }
 
-SyscallCoroutine pre_mmap(syscall_context* details) {
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
+SyscallCoroutine pre_mmap(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
   char lib_path[128];
 
   // fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
-  int flags  = (int)get_arg(regs, RegIndex::ARG3);
-  int fd = (int)get_arg(regs, RegIndex::ARG4); 
+  int flags  = details->get_arg(3);
+  int fd = details->get_arg(4);
 
   if (!(flags & MAP_ANONYMOUS)) {
     if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
@@ -193,22 +187,13 @@ SyscallCoroutine pre_mmap(syscall_context* details) {
   }
 
   // yield original syscall
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall());
   co_return rv;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-
-  // We care about execve, execve_at and mmap
-  if (callno == __NR_execve)
-    return &pre_execve;
-  else if (callno == __NR_execveat)
-    return &pre_execve_at;
-  else if (callno == __NR_mmap)
-    return &pre_mmap;
-
-  return NULL;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[SYS_execve] = pre_execve;
+  map[SYS_execveat] = pre_execveat;
+  map[SYS_mmap] = pre_mmap;
+  return true;
 }
-
-
