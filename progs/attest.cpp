@@ -10,7 +10,7 @@
 #include <map>
 #include <openssl/sha.h>
 
-#include "hyde.h"
+#include "hyde_sdk.h"
 #include "file_helpers.h"
 
 // Store mapping of filenames to sha1sums
@@ -39,7 +39,7 @@ bool hash_match(const char *path, const char *digest) {
 
 // Duplicate from sbom.cpp
 template <std::size_t N>
-SyscCoroHelper hash_file(syscall_context *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
+SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&outbuf)[SHA_DIGEST_LENGTH*2+1]) {
   // Hash a file at the specified pointer. write ascii digest into outbuf
   int rv = 0;
   std::string buffer;
@@ -93,23 +93,23 @@ SyscCoroHelper hash_file(syscall_context *details, char(&path)[N], unsigned char
       }
     }
   }
- co_return rv;
+
+  yield_syscall(details, close, guest_fd);
+  co_return rv;
 }
 
 
-SyscallCoroutine pre_execve_at(syscall_context* details) {
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
+SyscallCoroutine pre_execveat(SyscallCtx* details) {
   char full_path[256];
   int readlink_rv;
-  int fd = get_arg(regs, RegIndex::ARG0); 
+  int fd = details->get_arg(0);
   int hash_result;
 
   ExitStatus rv = ExitStatus::SUCCESS;
 
   // Read pathname from arg 1
   char path[256];
-  if (yield_from(ga_memread, details, path, get_arg(regs, RegIndex::ARG1), sizeof(path)) == -1) {
+  if (yield_from(ga_memread, details, path, details->get_arg(1), sizeof(path)) == -1) {
       printf("[Attest] Unable to read filename\n");
       rv = ExitStatus::SINGLE_FAILURE;
       goto out;
@@ -145,25 +145,22 @@ SyscallCoroutine pre_execve_at(syscall_context* details) {
     // Actual success, we calculated the hash
     if (!hash_match(full_path, (char*)digest)) {
       printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", full_path, digest);
-      details->orig_syscall->callno = SYS_getpid; // We can't leave original since execve is noreturn
-      details->orig_syscall->has_retval = true;
-      details->orig_syscall->retval = -ENOEXEC;
-      co_return ExitStatus::SUCCESS; // Successfully blocked it
+
+      details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+      rv = ExitStatus::SUCCESS; // Successfully blocked it
     }
   }
 
 out:
   // yield original syscall (execve_at)
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall());
   co_return rv;
 }
 
-SyscallCoroutine pre_execve(syscall_context* details) {
-  struct kvm_regs regs;
+SyscallCoroutine pre_execve(SyscallCtx* details) {
   char path[256];
   ExitStatus rv = ExitStatus::SUCCESS;
-  get_regs_or_die(details, &regs);
-  uint64_t path_ptr = get_arg(regs, RegIndex::ARG0); 
+  uint64_t path_ptr = details->get_arg(0);
 
   if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
       printf("[Attest] Unable to read filename at %lx\n", path_ptr);
@@ -181,36 +178,35 @@ SyscallCoroutine pre_execve(syscall_context* details) {
     } else {
       if (!hash_match(path, (char*)digest)) {
         printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", path, digest);
-        details->orig_syscall->callno = SYS_getpid; // We can't leave original since execve is noreturn
-        details->orig_syscall->has_retval = true;
-        details->orig_syscall->retval = -ENOEXEC;
-        co_return ExitStatus::SUCCESS; // Successfully blocked it
+        details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+        rv = ExitStatus::SUCCESS; // Successfully blocked it
       }
     }
   }
 
   // yield original syscall
-  co_yield *(details->orig_syscall);
+  co_yield *(details->get_orig_syscall()); // If we block it, we hit our return, otherwise we never finish this
   co_return rv;
 }
 
-SyscallCoroutine pre_mmap(syscall_context* details) {
-  struct kvm_regs regs;
-  get_regs_or_die(details, &regs);
+SyscallCoroutine pre_mmap(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
+#if 0
   char lib_path[128];
 
   // fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
-  int flags  = (int)get_arg(regs, RegIndex::ARG3);
-  int fd = (int)get_arg(regs, RegIndex::ARG4); 
+  int flags  = details->get_arg(3);
+  int fd = details->get_arg(4);
 
   if (!(flags & MAP_ANONYMOUS)) {
+    printf("DOIN STUFF\n");
     if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
       printf("[Attest] Unable to get filename for fd %d\n", fd);
       rv = ExitStatus::SINGLE_FAILURE;
     } else {
       // Successfully got filename, let's use it!
       unsigned char digest[SHA_DIGEST_LENGTH*2+1] = {0};
+
       int hash_result = yield_from(hash_file, details, lib_path, digest);
       if (hash_result == INTERNAL_ERROR) {
         // We failed
@@ -219,33 +215,26 @@ SyscallCoroutine pre_mmap(syscall_context* details) {
       } else if (hash_result < 0) {
         // Not our failure, leave RV as success
       } else {
-        printf("[Attest] Mapped file %s with hash %s\n", lib_path, digest);
-      if (!hash_match(lib_path, (char*)digest)) {
-        printf("[Attest] BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
-        details->orig_syscall->callno = SYS_getpid; // We can't leave original since execve is noreturn
-        details->orig_syscall->has_retval = true;
-        details->orig_syscall->retval = -ENOMEM;
-        co_return ExitStatus::SUCCESS; // Successfully blocked it
-      }
+        //printf("[Attest] Mapped file %s with hash %s\n", lib_path, digest);
+        if (!hash_match(lib_path, (char*)digest)) {
+          printf("[Attest] BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
+          details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+          rv = ExitStatus::SUCCESS; // Successfully blocked it
+        }
       }
     }
   }
+#endif
 
   // yield original syscall
-  co_yield *(details->orig_syscall);
+  details->get_orig_syscall()->pprint();
+  co_yield *(details->get_orig_syscall()); // If we yield a noreturn can we still get advanced just with a bogus RV? Didn't we try this before?
   co_return rv;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-
-  // We care about execve, execve_at and mmap
-  if (callno == __NR_execve)
-    return &pre_execve;
-  else if (callno == __NR_execveat)
-    return &pre_execve_at;
-  else if (callno == __NR_mmap)
-    return &pre_mmap;
-
-  return NULL;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  //map[SYS_execve] = pre_execve;
+  //map[SYS_execveat] = pre_execveat;
+  map[SYS_mmap] = pre_mmap;
+  return true;
 }
