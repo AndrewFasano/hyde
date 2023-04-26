@@ -14,7 +14,8 @@
 #include <iostream>
 #include <unistd.h>
 #include <fcntl.h>
-#include "hyde.h"
+
+#include "hyde_sdk.h"
 #include "file_helpers.h"
 
 static int open_count = 0;
@@ -30,16 +31,14 @@ bool is_allowed(int pid) {
     return pid % 2; // only odd PID's
 }
 
-SyscallCoroutine pre_close(syscall_context *details) {
+SyscallCoroutine pre_close(SyscallCtx *details) {
     // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
 
-    struct kvm_regs regs;
-    get_regs_or_die(details, &regs);
-
     char path[128];
-    int rv = yield_from(fd_to_filename, details, get_arg(regs, RegIndex::ARG0), path);
+    int rv = yield_from(fd_to_filename, details, (uint64_t)details->get_arg(0), path); // XXX why you fail
 
     if (rv < 0) {
+        printf("SecretFile: Error: could not get filename before close for fd %ld\n", details->get_arg(0));
         co_return ExitStatus::SINGLE_FAILURE;
     }
 
@@ -47,21 +46,19 @@ SyscallCoroutine pre_close(syscall_context *details) {
         open_count--;
     }
 
-    co_yield *(details->orig_syscall);
+    co_yield *(details->get_orig_syscall());
     co_return ExitStatus::SUCCESS;
 
 }
 
-SyscallCoroutine pre_read(syscall_context *details) {
+SyscallCoroutine pre_read(SyscallCtx *details) {
     // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
 
-    struct kvm_regs regs;
-    get_regs_or_die(details, &regs);
-
     char path[128];
-    int rv = yield_from(fd_to_filename, details, get_arg(regs, RegIndex::ARG0), path);
+    int rv = yield_from(fd_to_filename, details, details->get_arg(0), path);
 
     if (rv < 0) {
+        printf("SecretFile: Error: could not get filename before read for fd %ld\n", details->get_arg(0));
         co_return ExitStatus::SINGLE_FAILURE;
     }
 
@@ -71,12 +68,12 @@ SyscallCoroutine pre_read(syscall_context *details) {
 
         // read should copy the contents of the host file into the guest
         // the arguments of the read syscall are fd, buf, count. We just care about buf and count
-        uint64_t outbuf = get_arg(regs, RegIndex::ARG1);
-        ssize_t count = (size_t)get_arg(regs, RegIndex::ARG2);
+        uint64_t outbuf = details->get_arg(1);
+        ssize_t count = (size_t)details->get_arg(2);
 
         //printf("Populate buffer at %lx with up to %ld bytes from file\n", (uint64_t)outbuf, count);
-        int pid = yield_syscall0(details, getpid);
-        int tid = yield_syscall0(details, gettid);
+        int pid = yield_syscall(details, getpid);
+        int tid = yield_syscall(details, gettid);
 
         auto pid_tid = std::make_pair(pid, tid);
 
@@ -86,8 +83,8 @@ SyscallCoroutine pre_read(syscall_context *details) {
         // open the host file and read it into a buffer - no helper since it's a host file
         int host_fd = open(host_file, O_RDONLY);
         if (host_fd < 0) {
-            //printf("SecretFile: Unable to open host file %s: error %d\n", host_file, host_fd);
-            co_yield *(details->orig_syscall);
+            printf("SecretFile: Unable to open host file %s: error %d\n", host_file, host_fd);
+            co_yield *(details->get_orig_syscall());
             co_return ExitStatus::SINGLE_FAILURE;
         }
 
@@ -110,42 +107,39 @@ SyscallCoroutine pre_read(syscall_context *details) {
         }
 
         // Orig syscall should return the number of bytes read
-        details->orig_syscall->has_retval = true;
-        details->orig_syscall->retval = count;
+        details->set_nop(count);
 
         free(scratch);
     }
 
-    co_yield *(details->orig_syscall);
+    co_yield *(details->get_orig_syscall());
     co_return ExitStatus::SUCCESS;
 }
 
-SyscallCoroutine start_coopter(syscall_context *details)
+SyscallCoroutine start_coopter(SyscallCtx *details)
 {
     ExitStatus rv = ExitStatus::SUCCESS;
-    struct kvm_regs regs;
-    get_regs_or_die(details, &regs);
 
     // Open: path pointer is first argument
-    RegIndex path_arg = RegIndex::ARG0;
+    int path_arg = 0;
 
-    if (details->orig_syscall->callno == SYS_openat) {
+    if (details->get_orig_syscall()->callno == SYS_openat) {
         // openat: path pointer is second argument
         // TODO: do we care about resolving dirfd? Could use fcntls to get path
-        path_arg = RegIndex::ARG1;
+        path_arg = 1;
     }
 
-    uint64_t path_ptr = get_arg(regs, path_arg);
+    uint64_t path_ptr = details->get_arg(path_arg);
 
     //printf("Read path at %lx aka %lx\n", (uint64_t)get_arg(regs, path_arg), (uint64_t)path_ptr);
     char path[128];
     if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
         printf("SecretFile: Unable to read path pointer %lx\n", path_ptr);
-        co_yield *(details->orig_syscall);
+        co_yield *(details->get_orig_syscall());
         co_return ExitStatus::SINGLE_FAILURE;
     }
 
-    int pid = yield_syscall0(details, getpid);
+    int pid = yield_syscall(details, getpid);
 
     if (strncmp(path, guest_file, sizeof(guest_file)) == 0) {
         // Trying to open our target file
@@ -157,8 +151,7 @@ SyscallCoroutine start_coopter(syscall_context *details)
                 open_count++;
                 // Modify orig_syscall object so when we yield it in a sec, the guest
                 // will end up with our FD instead of the one it wanted
-                details->orig_syscall->retval = fd;
-                details->orig_syscall->has_retval = true;
+                details->set_nop(fd);
             } else {
                 printf("[SecretFile] Unable to open placeholder file %s]", guest_placeholder);
                 rv = ExitStatus::SINGLE_FAILURE;
@@ -168,18 +161,15 @@ SyscallCoroutine start_coopter(syscall_context *details)
         }
     }
 
-    co_yield *(details->orig_syscall);
+    co_yield *(details->get_orig_syscall());
     co_return rv;
 }
 
-create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
-                             long unsigned int pc, unsigned int asid) {
-    if (callno == SYS_openat || callno == SYS_open)
-        return &start_coopter;
-    else if (open_count > 0 && callno == SYS_read)
-        return &pre_read;
-    else if (open_count > 0 && callno == SYS_close)
-        return &pre_close;
+extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  map[SYS_openat] = start_coopter;
+  map[SYS_open] = start_coopter;
+  map[SYS_read] = pre_read;
+  map[SYS_close] = pre_close;
 
-    return NULL;
+  return true;
 }
