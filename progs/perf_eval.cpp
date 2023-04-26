@@ -19,8 +19,7 @@ SyscallCoroutine inject_getpid(SyscallCtx* ctx) {
     int rv = yield_syscall(ctx, getpid);
   }
 
-  co_yield *ctx->get_orig_syscall();
-  co_return ExitStatus::SUCCESS;
+  co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
 void __attribute__ ((constructor)) setup(void) {
