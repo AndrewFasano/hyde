@@ -1,88 +1,70 @@
 #include <sys/stat.h> // for open flags
-#include <fcntl.h>
-#include <vector>
+#include <sys/types.h> // for open flags
+#include <fcntl.h> // for open flags
 #include <iostream>
+#include <mutex>
+#include <sys/random.h>
 #include "hyde_sdk.h"
 
-static std::mutex running_in_root_proc;
+#define SZ 1024
 
-SyscCoroHelper my_read_file(SyscallCtx *ctx, char* out_data, char* pathname, int out_size) {
-    char local_pathname[128];
-    if (strlen(pathname) > sizeof(local_pathname)) {
-        printf("[PS] Error: pathname too long\n");
-        co_return -1;
+SyscallCoroutine pre_mmap(SyscallCtx* details) {
+  // Fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
+  int flags  = details->get_arg(3);
+
+  if (!(flags & MAP_ANONYMOUS)) {
+    // Allocate scratch
+    uint64_t scratch = yield_syscall_raw(details, mmap, 0, SZ, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if ((int64_t)scratch < 0 && (int64_t)scratch > -4096) {
+        printf("MMAP FAILURE: %ld\n", (int64_t)scratch);
+        assert(0);
     }
-    char *start = out_data;
-    memset(out_data, 'A', out_size);
+    // Force guest to write to the scratch buffer which makes the kernel actually allocate the memory for us to use
+    yield_syscall(details, getrandom, scratch, SZ, 0);
+    // XXX at this point the buffer could still be aliased, but we just asked for SZ random bytes so let's assume the odds of a collision are 0
+    // Otherwise we'd have issues with race conditions if other processes accessed this aliased memory while we were going, and we'd need to restore at the end
 
-    // Open file
-    memcpy(local_pathname, pathname, sizeof(local_pathname));
-    int fd = yield_syscall(ctx, open, local_pathname, O_RDONLY, 0);
+    // NOW SAFE TO USE HOST_BUF
+    void* host_buf;
+    assert(yield_from(ga_map, details, scratch, &host_buf, SZ) == 0);
 
-    if (fd < 0) {
-        printf("[PS] Error: could not open %s\n", pathname);
-        snprintf(out_data, out_size, "[open error]");
-        out_data[0] = 0;
-        co_return fd;
-    }
+    // Let's readlink /proc/self/fd/X
+    snprintf((char*)host_buf, SZ, "/proc/self/fd/%ld", details->get_arg(4));
 
-    char host_buf[1024];
-    int read_rv;
-    int bytes_read = 0;
-    do {
-        // Read up to min(sizeof(host_buf), out_size) into host buf
-        // Then copy that data into out_data, decrementing out_size
+    int readlink_sz = yield_syscall(details, readlink, scratch, scratch+512, 512);
 
-        read_rv = yield_syscall(ctx, read, fd, host_buf, std::min(sizeof(host_buf), (size_t)out_size));
-        if (read_rv < 0) break;
+    // Now read result
+    char result[512];
+    yield_from(ga_memread, details, result, scratch+512, readlink_sz);
+    result[readlink_sz] = 0;
+    printf("FD %ld is %s\n", details->get_arg(4), result);
 
-        memcpy(out_data, host_buf, read_rv);
-        out_data += read_rv;
-        out_size -= read_rv;
+    yield_from(ga_memwrite, details, scratch, result, strlen(result)+1);
+    // Now let's open that file
+    int fd = yield_syscall(details, open, scratch, O_RDONLY);
 
-        bytes_read += read_rv;
+    if (fd >= 0) {
+      int read_rv = yield_syscall(details, read, fd, scratch, SZ);
 
-        if (out_size <= 0) {
-            break;
-        }
-    } while (read_rv > 0);
+      char filebuf[SZ];
+      yield_from(ga_memread, details, filebuf, scratch, read_rv);
+      filebuf[read_rv] = 0;
+      yield_syscall(details, close, fd);
 
-    yield_syscall(ctx, close, fd);
-    if (read_rv < 0) {
-        printf("Error reading: %d\n", read_rv);
-        co_return read_rv; // linux errno
-    }
-    start[bytes_read] = 0; // Ensure null term
-    co_return bytes_read;
-}
-
-SyscallCoroutine read_in_root(SyscallCtx *ctx) {
-    if (yield_syscall(ctx, geteuid)) {
-        // Non-root
-        co_yield *(ctx->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Not an error
-
-    } else if (!running_in_root_proc.try_lock()) {
-        // Lock unavailable, bail on this coopter
-        // Note we don't want to wait since that would block a guest proc
-        co_yield *(ctx->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Not an error
+      printf("File contents: %s\n", filebuf);
+    }else {
+      printf("Failed to read file: %d\n", fd);
     }
 
-    char out[2048];
-    int bytes_read = yield_from(my_read_file, ctx, out, "/etc/passwd", sizeof(out));
-
-    std::cerr << "Read " << bytes_read << " bytes from /etc/passwd" << std::endl;
-    std::cerr << "Contents: " << std::endl;
-    std::cerr << out << std::endl;
-
-    ctx->get_orig_syscall()->pprint();
-    co_yield *(ctx->get_orig_syscall());
-    printf("Original syscall returned %ld\n", ctx->get_result());
-    co_return ExitStatus::FINISHED;
+    // Cleanup - restore scratch
+    yield_syscall(details, munmap, scratch, SZ);
+  }
+  
+  // yield original syscall
+  co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  map[-1] = read_in_root;
+  map[SYS_mmap]  = pre_mmap;
   return true;
 }
