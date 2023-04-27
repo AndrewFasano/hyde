@@ -7,6 +7,7 @@
 #include <sys/stat.h>  // O_RDONLY
 #include <fcntl.h>     // O_RDONLY
 #include <vector>
+#include <unordered_set>
 #include <map>
 #include <openssl/sha.h>
 
@@ -15,6 +16,8 @@
 
 #define BUF_SZ 1024 // Size to use for read chunks
 #define INTERNAL_ERROR -99999
+
+std::unordered_set<std::string> read_files;
 
 // Duplicated in attest.cpp
 template <std::size_t N>
@@ -77,6 +80,29 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
   co_return rv;
 }
 
+template <std::size_t N>
+SyscCoroHelper hash_if_new(SyscallCtx* details, char (&lib_path)[N]) {
+  if (!read_files.count(std::string(lib_path))) {
+    std::string filebuf;
+    int read_sz = yield_from(read_file, details, lib_path, &filebuf);
+    read_files.insert(std::string(lib_path));
+
+    unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
+    int hash_result = yield_from(hash_file, details, lib_path, hashbuf);
+    if (hash_result == INTERNAL_ERROR) {
+      // We failed
+      printf("[SBOM] Unable to hash mapped file %s\n", lib_path);
+      co_return -1;
+    } else if (hash_result < 0) {
+      // Not our failure, leave RV as success
+    } else {
+      printf("[SBOM] Mapped file %s with hash %s\n", lib_path, hashbuf);
+    }
+  }
+  co_return 0;
+}
+
+
 SyscallCoroutine pre_execveat(SyscallCtx* details) {
   char full_path[256];
   int readlink_rv;
@@ -110,24 +136,13 @@ SyscallCoroutine pre_execveat(SyscallCtx* details) {
     snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, path);
   }
 
-  unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1];
-  hash_result = yield_from(hash_file, details, full_path, hashbuf);
-
-  if (hash_result == INTERNAL_ERROR) {
-    // We failed
-    printf("[SBOM] Unable to hash file %s: %d\n", full_path, hash_result);
-    rv = ExitStatus::SINGLE_FAILURE; // Not our failure
-  } else if (hash_result < 0) {
-    // Not our failure, leave RV as success
-  } else {
-    // Actual success, we calculated the hash
-    printf("Hash of %s: %s\n", path, hashbuf);
-  }
+    if (yield_from(hash_if_new, details, full_path) == -1) {
+      rv = ExitStatus::SINGLE_FAILURE;
+    }
 
 out:
   // yield original syscall
-  co_yield *(details->get_orig_syscall());
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_execve(SyscallCtx* details) {
@@ -139,23 +154,13 @@ SyscallCoroutine pre_execve(SyscallCtx* details) {
       printf("[SBOM] Unable to read filename at %lx\n", path_ptr);
       rv = ExitStatus::SINGLE_FAILURE;
   } else {
-    //printf("Exec filename; %s\n", path);
-    unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
-    int hash_result = yield_from(hash_file, details, path, hashbuf);
-    if (hash_result == INTERNAL_ERROR) {
-      // We failed
-      printf("[SBOM] Unable to hash file %s\n", path);
-      rv = ExitStatus::SINGLE_FAILURE;
-    } else if (hash_result < 0) {
-      // Not our failure, leave RV as success
-    } else {
-      printf("[SBOM] Hash of %s: %s\n", path, hashbuf);
-    }
+      if (yield_from(hash_if_new, details, path) == -1) {
+        rv = ExitStatus::SINGLE_FAILURE;
+      }
   }
 
   // yield original syscall
-  co_yield *(details->get_orig_syscall());
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_mmap(SyscallCtx* details) {
@@ -172,23 +177,14 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
       rv = ExitStatus::SINGLE_FAILURE;
     } else {
       // Successfully got filename, let's use it!
-      unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
-      int hash_result = yield_from(hash_file, details, lib_path, hashbuf);
-      if (hash_result == INTERNAL_ERROR) {
-        // We failed
-        printf("[SBOM] Unable to hash mapped file %s\n", lib_path);
+      if (yield_from(hash_if_new, details, lib_path) == -1) {
         rv = ExitStatus::SINGLE_FAILURE;
-      } else if (hash_result < 0) {
-        // Not our failure, leave RV as success
-      } else {
-        printf("[SBOM] Mapped file %s with hash %s\n", lib_path, hashbuf);
       }
     }
   }
 
   // yield original syscall
-  co_yield *(details->get_orig_syscall());
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
