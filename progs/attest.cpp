@@ -153,8 +153,7 @@ SyscallCoroutine pre_execveat(SyscallCtx* details) {
 
 out:
   // yield original syscall (execve_at)
-  co_yield *(details->get_orig_syscall());
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_execve(SyscallCtx* details) {
@@ -185,8 +184,7 @@ SyscallCoroutine pre_execve(SyscallCtx* details) {
   }
 
   // yield original syscall
-  co_yield *(details->get_orig_syscall()); // If we block it, we hit our return, otherwise we never finish this
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_mmap(SyscallCtx* details) {
@@ -224,8 +222,7 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
   }
 
   // yield original syscall
-  co_yield *(details->get_orig_syscall()); // If we yield a noreturn can we still get advanced just with a bogus RV? Didn't we try this before?
-  co_return rv;
+  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
