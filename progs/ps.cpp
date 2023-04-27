@@ -16,81 +16,38 @@
 #include <dirent.h>
 #include <vector>
 #include "hyde_sdk.h"
+#include "file_helpers.h"
 
 static std::mutex running_in_root_proc;
 
 
-SyscCoroHelper my_read_file(SyscallCtx *ctx, char* out_data, char* pathname, int out_size) {
-    char local_pathname[128];
-    if (strlen(pathname) > sizeof(local_pathname)) {
-        printf("[PS] Error: pathname too long\n");
-        co_return -1;
-    }
-    //assert(strlen(pathname) < sizeof(local_pathname));
-    char *start = out_data;
-    memset(out_data, 'A', out_size);
-
-    // Open file
-    memcpy(local_pathname, pathname, sizeof(local_pathname));
-    int fd = yield_syscall(ctx, open, local_pathname, O_RDONLY, 0);
-
-    if (fd < 0) {
-        printf("[PS] Error: could not open %s\n", pathname);
-        snprintf(out_data, out_size, "[open error]");
-        out_data[0] = 0;
-        co_return fd;
-    }
-
-    char host_buf[1024];
-    int read_rv;
-    int bytes_read = 0;
-    do {
-        read_rv = yield_syscall(ctx, read, fd, host_buf, 1024);
-        memcpy(out_data, host_buf, std::min(read_rv, (int)(out_size - (out_data - start))));
-        out_data += read_rv;
-
-        bytes_read += read_rv;
-
-        if (out_data - start > out_size) {
-            break;
-        }
-    } while (read_rv > 0);
-
-    yield_syscall(ctx, close, fd);
-    if (read_rv < 0) {
-        printf("Error reading: %d\n", read_rv);
-        co_return read_rv; // linux errno
-    }
-    start[bytes_read] = 0; // Ensure null term
-    co_return bytes_read;
-}
-
 SyscCoroHelper print_procinfo(SyscallCtx *ctx, std::vector<int> *pids) {
     for (int pid : *pids) {
         char fd_path[128];
-        char comm[128];
-        char cmdline[128];
+        //char comm[128];
+        //char cmdline[128];
 
         // Read /proc/<pid>/cmdline and /proc/<pid>/comm
         // Replace null bytes and newlines with spaces, except for the final null byte
         snprintf(fd_path, sizeof(fd_path), "/proc/%d/cmdline", pid);
 
-        int cmdline_read = yield_from(my_read_file, ctx, cmdline, fd_path, sizeof(fd_path));
-
+        std::string cmdline, comm;
+        int cmdline_read = yield_from(read_file, ctx, fd_path, &cmdline);
         for (int i = 0; i < std::max(0, cmdline_read); i++) {
             if (cmdline[i] == '\n') cmdline[i] = ' ';
             if (cmdline[i] == '\0') cmdline[i] = ' ';
         }
-        cmdline[cmdline_read] = 0 ; // Put back null term
+        cmdline[std::max(cmdline_read, 0)] = 0 ; // Put back null term
 
         snprintf(fd_path, sizeof(fd_path), "/proc/%d/comm", pid);
-        int comm_read = yield_from(my_read_file, ctx, comm, fd_path, sizeof(comm));
-        for (int i = 0; i < std::max(0, comm_read); i++) {
-            if (comm[i] == '\n') comm[i] = ' ';
+        int comm_read = yield_from(read_file, ctx, fd_path, &comm);
+        // Replace all null bytes in our comm string
+        for (int i=0; i < std::max(0, comm_read); i++) {
             if (comm[i] == '\0') comm[i] = ' ';
+            if (comm[i] == '\n') comm[i] = ' ';
         }
-        comm[comm_read] = 0; // Put back null term
-        printf("%03d: %-50s  %-20s\n", pid, cmdline, comm);
+
+        printf("%03d: %-50s  %-20s\n", pid, cmdline.c_str(), comm.c_str());
     }
 
     co_return 0;
@@ -98,47 +55,47 @@ SyscCoroHelper print_procinfo(SyscallCtx *ctx, std::vector<int> *pids) {
 }
 
 SyscCoroHelper ls_dir(SyscallCtx *ctx, char* dirname, std::vector<int> *pids) {
-    int fd;
-    long nread;
-    char d_type;
-
     char local_dirname[128]; // Fixed size will automap unlike char*
-    memcpy(local_dirname, dirname, sizeof(local_dirname));
+    strncpy(local_dirname, dirname, sizeof(local_dirname) - 1);
+    local_dirname[sizeof(local_dirname) - 1] = '\0';
+
 
     // Yield syscall to guest_buf as a readonly directory
-    fd = yield_syscall(ctx, open, local_dirname, O_RDONLY | O_DIRECTORY);
+    int fd = yield_syscall(ctx, open, local_dirname, O_RDONLY | O_DIRECTORY);
 
     if (fd < 0) {
-        printf("[PS] unable to open %s\n", dirname);
-        co_return fd; // Pass errno back through
+        printf("[PS] unable to open %s: %d\n", dirname, fd);
+        co_return fd; // Pass errno back to caller
     }
 
-    while(true) {
-        // Yield getdents syscall with fd
-        // See man 2 getdents64 for example that this is based on
-        char host_buf[1024];
-        nread = (long)yield_syscall(ctx, getdents64, fd, host_buf, sizeof(host_buf));
+    while (true) {
+        // Buffer to hold dentries. By calling this loop multiple times I think
+        // we iterate through the dentries(?) - eventually we get a return of 0 when we're done
+        char d_buffer[2048]; 
 
-        if (nread == -1) {
-            printf("[PS] unable to read dentries in loop\n");
+        long nread = (long)yield_syscall(ctx, getdents64, fd, d_buffer, sizeof(d_buffer));
+        assert (nread <= sizeof(d_buffer));
+
+        if (nread < 0 ) {
+            printf("[PS] unable to read dentries in loop: %ld\n", nread);
         }
 
-        if (nread == 0)
+        if (nread == 0) {
             break; // All done
+        }
 
         for (long bpos = 0; bpos < nread;) {
-            struct dirent64 d;
-            // Map guest memory to d. Note the syscall can return more than sizeof(d) bytes such as a struct stat
-            // after it - we intentionally dont' bother mapping this full buffer because we're lazy. As a result,
-            // we can't see d_type
-            memcpy(&d, host_buf + bpos, sizeof(d));
+            const struct dirent64 *d_ptr = reinterpret_cast<const struct dirent64 *>(d_buffer + bpos);
 
-            int pid = atoi(d.d_name);
-            if (pid > 0) {
-                pids->push_back(pid);
+            // If it's a directory, and the name is a number, add it to the PID list
+            if (d_ptr->d_type == DT_DIR) {
+                int pid = atoi(d_ptr->d_name);
+                if (pid > 0) {
+                    pids->push_back(pid);
+                }
             }
 
-            bpos += d.d_reclen;
+            bpos += d_ptr->d_reclen;
         }
     }
 
@@ -169,9 +126,8 @@ SyscallCoroutine ps_in_root(SyscallCtx *ctx) {
     // Print info for all PIDs
     yield_from(print_procinfo, ctx, &pids);
 
-    running_in_root_proc.unlock();
-    //co_yield *(ctx->get_orig_syscall());
-    //co_return ExitStatus::FINISHED;
+    //printf("Finish!\n");
+    //running_in_root_proc.unlock(); // Maybe never unlock?
     co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::FINISHED);
 }
 
