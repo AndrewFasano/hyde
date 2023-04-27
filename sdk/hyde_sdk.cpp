@@ -6,11 +6,9 @@
 /*
  * Copy size bytes from a guest virtual address into a host buffer.
  */
-SyscCoroHelper ga_memcpy_one(SyscallCtx* r, void* out, uint64_t gva, size_t size) {
+SyscCoroHelper _memsync_page(SyscallCtx* r, void* host_buf, uint64_t gva, size_t size, bool copy_to_host) {
   // We wish to read size bytes from the guest virtual address space
-  // and store them in the buffer pointed to by out. If out is NULL,
-  // we allocate it
-
+  assert(size != 0);
   uint64_t hva = 0;
 
   if (!r->translate_gva(gva, &hva)) {
@@ -23,17 +21,35 @@ SyscCoroHelper ga_memcpy_one(SyscallCtx* r, void* out, uint64_t gva, size_t size
       }
   }
 
-  //printf("Writing %lu bytes of data to %lx - %lx\n",  size, (uint64_t)out, (uint64_t)out + size);
-  memcpy((uint64_t*)out, (void*)hva, size);
+  // Sanity check - just for debugging, can we also translate the last byte?
+  uint64_t expected_hva_end = hva + size;
+  uint64_t hva_end;
+  uint64_t gva_end = gva + size;
+  if (!r->translate_gva(gva_end, &hva_end)) {
+    printf("FATAL couldn't translate last byte of page: %lx->%lx but %lx->???\n", gva_end, hva_end, gva_end);
+    co_return -1;
+  }
+  if (hva_end != expected_hva_end) {
+    printf("FATAL: Translated gva %lx -> %lx but %lx translates to %lx NOT %lx\n", gva, hva, gva_end, hva_end, expected_hva_end);
+    co_return -1;
+  }
+
+  if (copy_to_host) {
+    memcpy((uint64_t*)host_buf, (void*)hva, size);
+  } else {
+    memcpy((void*)hva, (uint64_t*)host_buf, size);
+  }
   co_return 0;
 }
 
+// Write size bytes of host_buf into guest at gva
+SyscCoroHelper ga_memwrite_one(SyscallCtx* r, void* host_buf, uint64_t gva, size_t size) {
+  co_return yield_from(_memsync_page, r, host_buf, gva, size, false);
+}
 
-/* Memread will copy guest data to a host buffer, paging in memory as needed.
- * It's an alias for ga_memcpy but that might go away later in favor of this name.
- */
-SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva_base, size_t size) {
-  co_return yield_from(ga_memcpy, r, out, gva_base, size);
+// Write size bytes from guest at gva into host_buf
+SyscCoroHelper ga_memread_one(SyscallCtx* r, void* host_buf, uint64_t gva, size_t size) {
+  co_return yield_from(_memsync_page, r, host_buf, gva, size, true);
 }
 
 /*
@@ -42,108 +58,104 @@ SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva_base, size_t si
  * address + size are mappable
  */
 SyscCoroHelper ga_memcpy(SyscallCtx* r, void* out, uint64_t gva_base, size_t size) {
-
   uint64_t gva_end = (uint64_t)((uint64_t)gva_base + size);
   uint64_t gva_start_page = (uint64_t)gva_base  & ~(PAGE_SIZE - 1);
-  //uint64_t gva_end_page = (uint64_t)gva_end  & ~(PAGE_SIZE - 1);
-  uint64_t first_page_size = std::min((uint64_t)gva_base - gva_start_page, (uint64_t)size);
+  uint64_t first_page_size = std::min(gva_base - gva_start_page, (uint64_t)size);
 
-  // Copy first page up to alignment (or maybe even end!)
-  //printf("Read up to %lu bytes into hva %lx from gva %lx\n", first_page_size, (uint64_t)out, (uint64_t)gva_base);
-  if (yield_from(ga_memcpy_one, r, out, gva_base, first_page_size) == -1) {
-    printf("First page read fails\n");
-    co_return -1;
+  // If first page isn't aligned, copy it and set us up to be aligned for subsequent pages
+  if (first_page_size != 0) {
+    if (yield_from(ga_memread_one, r, out, gva_base, first_page_size) == -1) {
+      printf("First page read fails\n");
+      co_return -1;
+    }
+
+    gva_base += first_page_size;
+    out = (void*)((uint8_t*)out + first_page_size);
   }
 
-  gva_base += first_page_size;
-  out = (void*)((uint64_t)out + first_page_size);
 
   while ((uint64_t)gva_base < (uint64_t)gva_end) {
     uint64_t this_sz = std::min((uint64_t)PAGE_SIZE, (uint64_t)gva_end - (uint64_t)gva_base);
-    if (yield_from(ga_memcpy_one, r, out, gva_base, this_sz) == -1) {
+    if (yield_from(ga_memread_one, r, out, gva_base, this_sz) == -1) {
       printf("Subsequent page read fails\n");
       co_return -1;
     }
     gva_base += this_sz;
-    out = (void*)((uint64_t)out + this_sz);
+    out = (void*)((uint8_t*)out + this_sz);
   }
   co_return 0;
-
-  #if 0
-  // Let's read from address to next page, then read pages? This is still a bit of a lazy implementation,
-  // really we should be like binary searching
-
-
-  // Given address X that lies somewhere between two pages, and say we want the subsequent page:
-  // | page1 start     X      | page2 start     | page 3 start
-
-  // First we calculate page1 start, translate it, calculate the offset of X into page one
-  // and copy the number of bytes from X to the end of page 1 into the buffer
-
-  #define PAGE_SIZE 0x1000uL
-  uint64_t start_offset = (uint64_t)gva_base & (PAGE_SIZE-1);
-  uint64_t first_page = (uint64_t)((uint64_t)gva_base & ~(PAGE_SIZE-1));
-
-  if (first_page != gva_base) {
-    // Original address wasn't page aligned
-    uint64_t hva;
-    if (!translate_gva(r, first_page, &hva)) {
-        yield_syscall(r, __NR_access, (__u64)first_page, 0);
-        if (!translate_gva(r, gva_base, &hva)) {
-          co_return -1; // Failure, even after retry
-        }
-    }
-    // Sanity check, should be able to translate requested address now that we have the page?
-    assert(can_translate_gva(r->cpu, gva_base));
-
-    //printf("\tga_memcpy: first copy. guest first page %lx maps to host %lx, reading from host at %lx\n", (uint64_t)first_page, hva, hva + start_offset);
-    memcpy((uint64_t*)out, (void*)(hva + start_offset), std::min((ulong)size, (ulong)(PAGE_SIZE - start_offset)));
-  }
-
-  // Now copy page-aligned memory, one page at a time
-  for (uint64_t page = gva_base + start_offset; page < gva_base + size; page += PAGE_SIZE) {
-    ulong remsize  = std::min((ulong)PAGE_SIZE, (ulong)((gva_base + size) - page));
-
-    printf("\tga_memcpy: subsequent page = %p, size=%lu\n", page, remsize);
-    uint64_t hva;
-    if (!translate_gva(r, page, &hva)) {
-        yield_syscall(r, __NR_access, (__u64)page, 0);
-        if (!translate_gva(r, gva_base, &hva)) {
-          co_return -1; // Failure, even after retry
-        }
-    }
-
-    printf("\tga_memcpy: subsequent copy of %lu bytes from %lx to %lx\n", remsize, hva, (uint64_t)out+(page-gva_base));
-    memcpy((uint64_t*)out+(page-gva_base), (void*)hva, remsize);
-  }
-
-  co_return 0;
-  #endif
 }
 
-/* Given a host buffer, write it to a guest virtual address. The opposite
- * of ga_memcpy */
-SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t _gva, void* in, size_t size) {
-  // TODO: re-issue translation requests as necessary
-  uint64_t hva;
-  __u64 gva = 0;
-  gva += (__u64)_gva;
+/* Write one page to guest virtual memory */
+SyscCoroHelper ga_memwrite_one(SyscallCtx* r, uint64_t gva, void* in, size_t size) {
   assert(size != 0);
 
+  if (size == 0) {
+    printf("FATAL memcpy size 0\n");
+    co_return -1;
+  }
+
+  uint64_t hva = 0;
   if (!r->translate_gva(gva, &hva)) {
-      int rv = yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
+      yield_syscall_raw(r, access, (uint64_t)gva, 0);
       if (!r->translate_gva(gva, &hva)) {
-        yield_syscall_raw(r, access, gva, 0); // XXX: don't auto-map arguments! And don't typecheck!
+        yield_syscall_raw(r, access, (uint64_t)gva, 0); // Try again
         if (!r->translate_gva(gva, &hva)) {
-          co_return -1; // Failure, even after double retry
+          co_return -1; // Failure, even after two retries?
         }
       }
   }
 
-  //printf("Copying %lu bytes of %s to GVA %lx\n", size, (char*)in, (uint64_t)gva);
-  memcpy((uint64_t*)hva, in, size);
+  // Sanity check - just for debugging, can we also translate the last byte?
+  uint64_t expected_hva_end = hva + size;
+  uint64_t hva_end;
+  uint64_t gva_end = gva + size;
+  if (!r->translate_gva(gva_end, &hva_end)) {
+    printf("FATAL couldn't translate last byte of page: %lx->%lx but %lx->???\n", gva_end, hva_end, gva_end);
+    co_return -1;
+  }
+  if (hva_end != expected_hva_end) {
+    printf("FATAL: Translated gva %lx -> %lx but %lx translates to %lx NOT %lx\n", gva, hva, gva_end, hva_end, expected_hva_end);
+    co_return -1;
+  }
+
+  memcpy((void*)hva, in, size);
   co_return 0;
 }
+
+/* Given a host buffer, write it to a guest virtual address. The opposite
+ * of ga_memcpy */
+SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t gva_base, void* in, size_t size) {
+  uint64_t gva_end = (uint64_t)((uint64_t)gva_base + size);
+  uint64_t gva_start_page = (uint64_t)gva_base  & ~(PAGE_SIZE - 1);
+  uint64_t first_page_size = std::min(gva_base - gva_start_page, (uint64_t)size);
+
+  // If first page isn't aligned, copy it and set us up to be aligned for subsequent pages
+  if (first_page_size != 0) {
+    if (yield_from(ga_memwrite_one, r, gva_base, in, first_page_size) == -1) {
+      printf("First page read fails\n");
+      co_return -1;
+    }
+
+    gva_base += first_page_size;
+    in = (void*)((uint8_t*)in + first_page_size);
+  }
+
+
+  while ((uint64_t)gva_base < (uint64_t)gva_end) {
+    uint64_t this_sz = std::min((uint64_t)PAGE_SIZE, (uint64_t)gva_end - (uint64_t)gva_base);
+    if (yield_from(ga_memwrite_one, r, gva_base, in, this_sz) == -1) {
+      printf("Subsequent page read fails\n");
+      co_return -1;
+    }
+    gva_base += this_sz;
+    in = (void*)((uint8_t*)in + this_sz);
+  }
+  co_return 0;
+}
+
+
+// OLD CODE that we might still use somewhere:
 
 SyscCoroHelper ga_map(SyscallCtx* r,  uint64_t gva, void** host, size_t min_size) {
   // Set host to a host virtual address that maps to the guest virtual address gva
@@ -172,3 +184,9 @@ SyscCoroHelper ga_map(SyscallCtx* r,  uint64_t gva, void** host, size_t min_size
   (*host) = (void*)hva;
   co_return 0;
 }
+
+// Alias for ga_memcpy
+SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva_base, size_t size) {
+  co_return yield_from(ga_memcpy, r, out, gva_base, size);
+}
+
