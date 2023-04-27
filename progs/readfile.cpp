@@ -2,9 +2,16 @@
 #include <sys/types.h> // for open flags
 #include <fcntl.h> // for open flags
 #include <iostream>
-#include <mutex>
+#include <unistd.h>
+#include <unordered_set>
+#include <string.h>
 #include <sys/random.h>
+#include <linux/limits.h>
+
 #include "hyde_sdk.h"
+#include "file_helpers.h"
+
+std::unordered_set<std::string> read_files;
 
 #define SZ 1024
 
@@ -20,6 +27,7 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
         assert(0);
     }
     // Force guest to write to the scratch buffer which makes the kernel actually allocate the memory for us to use
+    // We get a random value to ensure it's globally unique - note we could probably do a smaller buffer...
     yield_syscall(details, getrandom, scratch, SZ, 0);
     // XXX at this point the buffer could still be aliased, but we just asked for SZ random bytes so let's assume the odds of a collision are 0
     // Otherwise we'd have issues with race conditions if other processes accessed this aliased memory while we were going, and we'd need to restore at the end
@@ -64,7 +72,29 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
   co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
 }
 
+SyscallCoroutine pre_mmap2(SyscallCtx* details) {
+  // Fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
+  int flags  = details->get_arg(3);
+
+  if (!(flags & MAP_ANONYMOUS)) {
+    // Let's read the file
+    char filename[PATH_LENGTH];
+    yield_from(fd_to_filename, details, details->get_arg(4), filename);
+
+    // Have we already read this file?
+    if (!read_files.count(std::string(filename))) {
+      std::string filebuf;
+      int read_sz = yield_from(read_file, details, filename, &filebuf);
+      read_files.insert(std::string(filename));
+      printf("File %s: first read got %d bytes\n", filename, read_sz);
+    }
+  }
+
+  // yield original syscall
+  co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
+}
+
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  map[SYS_mmap]  = pre_mmap;
+  map[SYS_mmap]  = pre_mmap2;
   return true;
 }
