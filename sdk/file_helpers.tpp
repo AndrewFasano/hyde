@@ -10,6 +10,7 @@ SyscCoroHelper read_symlink(SyscallCtx* details, char(&inbuf)[N], char (&outbuf)
 
   // Use readlink to read symlink path - we can output as much as M bytes into outbuf
   readlink_rv = yield_syscall(details, readlink, inbuf, outbuf, M);
+  if (readlink_rv > 0 && readlink_rv < N) inbuf[readlink_rv] = 0;
   co_return readlink_rv;
 }
 

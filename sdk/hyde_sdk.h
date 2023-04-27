@@ -14,6 +14,7 @@
 #include <tuple>
 #include <utility>
 #include <coroutine>
+#include <sys/random.h>
 
 #include "hyde_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
@@ -73,7 +74,7 @@ SyscCoroHelper ga_map(SyscallCtx* r, uint64_t gva, void** host, size_t min_size)
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
-    //printf("Inject syscall %ld with %ld args, total size %ld\n", SyscallNumber, sizeof...(Args), TotalSize);
+    //printf("Inject syscall %ld with %ld args\n", SyscallNumber, sizeof...(Args));
     // Now generate an hsyscall object with the syscall number, arguments, and number of args
     hsyscall s(SyscallNumber);
  
@@ -84,6 +85,7 @@ hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Ar
       s.args[s.nargs++].value = (uint64_t)arg;
     };
     (set_args(args), ...);
+    //s.dump();
     return s;
 }
 
@@ -181,6 +183,7 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
     guest_stack = details->get_result(); /* Is this assert good enough error checking? */                   \
     assert((int64_t)guest_stack > 0 || (int64_t)guest_stack < -500);                                        \
+    co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, guest_stack, padded_total_size, 0);     \
   }                                                                                                         \
   hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                               \
   if (total_size > 0)                                                                                       \
@@ -199,8 +202,8 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
 })
 
 #define co_yield_noreturn(details, syscall, retval) ({ \
-details->set_noreturn(retval); co_yield syscall; \
-co_return ExitStatus::FATAL; /* UNREACHABLE */ \
+  details->set_noreturn(retval); co_yield syscall; \
+  co_return ExitStatus::FATAL; /* UNREACHABLE */ \
 })
 
 /* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */

@@ -3,11 +3,10 @@
 #define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
 
 // Implementations of the various ga_ coroutines
-/*
- * Copy size bytes from a guest virtual address into a host buffer.
- */
+/* 
+  Internal helper to syncronize a single page of guest->host or host->guest memory
+*/
 SyscCoroHelper _memsync_page(SyscallCtx* r, void* host_buf, uint64_t gva, size_t size, bool copy_to_host) {
-  // We wish to read size bytes from the guest virtual address space
   assert(size != 0);
   uint64_t hva = 0;
 
@@ -43,7 +42,7 @@ SyscCoroHelper _memsync_page(SyscallCtx* r, void* host_buf, uint64_t gva, size_t
 }
 
 // Write size bytes of host_buf into guest at gva
-SyscCoroHelper ga_memwrite_one(SyscallCtx* r, void* host_buf, uint64_t gva, size_t size) {
+SyscCoroHelper ga_memwrite_one(SyscallCtx* r, uint64_t gva, void* host_buf, size_t size) {
   co_return yield_from(_memsync_page, r, host_buf, gva, size, false);
 }
 
@@ -86,42 +85,6 @@ SyscCoroHelper ga_memcpy(SyscallCtx* r, void* out, uint64_t gva_base, size_t siz
   co_return 0;
 }
 
-/* Write one page to guest virtual memory */
-SyscCoroHelper ga_memwrite_one(SyscallCtx* r, uint64_t gva, void* in, size_t size) {
-  assert(size != 0);
-
-  if (size == 0) {
-    printf("FATAL memcpy size 0\n");
-    co_return -1;
-  }
-
-  uint64_t hva = 0;
-  if (!r->translate_gva(gva, &hva)) {
-      yield_syscall_raw(r, access, (uint64_t)gva, 0);
-      if (!r->translate_gva(gva, &hva)) {
-        yield_syscall_raw(r, access, (uint64_t)gva, 0); // Try again
-        if (!r->translate_gva(gva, &hva)) {
-          co_return -1; // Failure, even after two retries?
-        }
-      }
-  }
-
-  // Sanity check - just for debugging, can we also translate the last byte?
-  uint64_t expected_hva_end = hva + size;
-  uint64_t hva_end;
-  uint64_t gva_end = gva + size;
-  if (!r->translate_gva(gva_end, &hva_end)) {
-    printf("FATAL couldn't translate last byte of page: %lx->%lx but %lx->???\n", gva_end, hva_end, gva_end);
-    co_return -1;
-  }
-  if (hva_end != expected_hva_end) {
-    printf("FATAL: Translated gva %lx -> %lx but %lx translates to %lx NOT %lx\n", gva, hva, gva_end, hva_end, expected_hva_end);
-    co_return -1;
-  }
-
-  memcpy((void*)hva, in, size);
-  co_return 0;
-}
 
 /* Given a host buffer, write it to a guest virtual address. The opposite
  * of ga_memcpy */
@@ -159,28 +122,29 @@ SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t gva_base, void* in, size_t si
 
 SyscCoroHelper ga_map(SyscallCtx* r,  uint64_t gva, void** host, size_t min_size) {
   // Set host to a host virtual address that maps to the guest virtual address gva
+  uint64_t hva;
 
-  // TODO: Assert that gva+0 and gva+min_size can both be reached
-  //at host[0], and host[min_size] after mapping. If not, fail?
-  // TODO how to handle failures here?
-
-  uint64_t gpa;
-
-  if (!r->translate_gva(gva, &gpa)) {
-    // Translation failed on base address - not in our TLB, maybe paged out
-    // Inject access syscall, forcing guest kernel to page it in with no other side effects
-    yield_syscall_raw(r, access, gva, 0);
-    // Now retry
-    if (!r->translate_gva(gva, &gpa)) {
-      printf("ga_map double fails for %lx\n", gva);
-      co_return -1; // Failure!
+  int i = 0;
+  while (r->translate_gva(gva, &hva) == false && i++ <= 10) {
+    if (i == 10) {
+      printf("Translation failed 10 times, aborting\n");
+      co_return -1;
     }
+    yield_syscall_raw(r, access, gva, 0);
   }
 
-  // Translation has succeeded, we have the guest physical address
-  // Now translate that to the host virtual address
-  uint64_t hva;
-  assert(r->gpa_to_hva(gpa, &hva));
+  uint64_t hva_end;
+  if (!r->translate_gva(gva + min_size, &hva_end)) {
+    printf("Translation failed for end of range\n");
+    co_return -1;
+  }
+
+  if (hva_end - hva != min_size) {
+    printf("Range is not contigious\n");
+    co_return -1;
+  }
+
+  // Translation succeeded - we should now have HVA
   (*host) = (void*)hva;
   co_return 0;
 }
