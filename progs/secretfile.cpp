@@ -7,7 +7,7 @@
 #include <sys/types.h> // for open flags
 #include <sys/stat.h> // for open flags
 #include <fcntl.h>
-#include <vector>
+#include <unordered_set>
 #include <mutex>
 #include <map>
 #include <sstream>
@@ -21,6 +21,8 @@
 static int open_count = 0;
 static bool created_placeholder = false;
 
+std::unordered_set<int> pids;
+
 // Hardcoded file that guest will see when it's allowed
 const char host_file[] = {"/etc/issue"};
 const char guest_file[] = {"/issue"};
@@ -33,27 +35,42 @@ bool is_allowed(int pid) {
 }
 
 SyscallCoroutine pre_close(SyscallCtx *details) {
-    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
+    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd> if we have any active pids
 
-    char path[128];
+    if (pids.size() == 0 || pids.count(yield_syscall(details, getpid)) == 0) {
+        co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
+    }
+
+    char path[sizeof(guest_placeholder)];
     int rv = yield_from(fd_to_filename, details, (uint64_t)details->get_arg(0), path); // XXX why you fail
 
     if (rv < 0) {
-        printf("SecretFile: Error: could not get filename before close for fd %ld\n", details->get_arg(0));
+        if (rv == -ENOENT || rv == -ENAMETOOLONG) {
+            // There's no /proc/self/fd/<fd>, perhaps the guest is closing an FD that isn't opened (which happens a lot)
+            // Or the name is larger than the name of our placeholder file, indicating it's *not* our file
+            // Just ignore it
+            co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
+        }
+        printf("SecretFile: Error: could not get filename before close for fd %ld: Error %d\n", details->get_arg(0), rv);
         co_return ExitStatus::SINGLE_FAILURE;
     }
 
     if (strncmp(path, guest_placeholder, strlen(path)) == 0) {
-        open_count--;
+        printf("DROP PID FROM PIDS: %d\n", yield_syscall(details, getpid));
+        pids.erase(yield_syscall(details, getpid));
+        printf("PIDS now has %ld elements\n", pids.size());
     }
 
-    co_yield *(details->get_orig_syscall());
-    co_return ExitStatus::SUCCESS;
-
+    co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
 }
 
 SyscallCoroutine pre_read(SyscallCtx *details) {
     // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
+
+    // Is pid in pids?
+    if (pids.size() == 0 || pids.count(yield_syscall(details, getpid)) == 0) {
+        co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
+    }
 
     char path[128];
     int rv = yield_from(fd_to_filename, details, details->get_arg(0), path);
@@ -119,45 +136,44 @@ SyscallCoroutine pre_read(SyscallCtx *details) {
     co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
-SyscallCoroutine start_coopter(SyscallCtx *details) {
+SyscallCoroutine pre_open(SyscallCtx *details) {
     ExitStatus rv = ExitStatus::SUCCESS;
 
     int path_arg = (details->get_orig_syscall()->callno == SYS_open ? 0 : 1);
     uint64_t path_ptr = details->get_arg(path_arg);
 
-    //printf("Read path at %lx aka %lx\n", (uint64_t)get_arg(regs, path_arg), (uint64_t)path_ptr);
     char path[128];
     if (yield_from(ga_strncpy, details, path, path_ptr, sizeof(path)) == -1) {
         printf("SecretFile: Unable to read path pointer %lx\n", path_ptr);
         co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
     }
 
-    int pid = yield_syscall(details, getpid);
-
     if (strncmp(path, guest_file, sizeof(guest_file)) == 0) {
+        int pid = yield_syscall(details, getpid);
         // Trying to open our target file
         //printf("SecretFile: Guest is trying to open our file: %s\n", path);
         if (is_allowed(pid)) {
+            printf("[SecretFile] Guest %d IS allowed to open %s\n", pid, path);
             // Open and create the placeholder file
             int fd = yield_syscall(details, open, guest_placeholder, O_CREAT | O_RDWR, 0644);
             if (fd >= 0) {
                 open_count++;
                 // Modify orig_syscall object so when we yield it in a sec, the guest
                 // will end up with our FD instead of the one it wanted
-                details->set_nop(fd);
                 created_placeholder = true;
-
-                co_yield *details->get_orig_syscall();
-                co_return ExitStatus::SUCCESS;
 
             } else if (fd == -EEXIST && created_placeholder) {
                 fd = yield_syscall(details, open, guest_placeholder, O_RDONLY);
             }
 
-            if (fd < 0) {
-                printf("[SecretFile] Unable to open/create placeholder file %s]", guest_placeholder);
-                rv = ExitStatus::SINGLE_FAILURE;
+            if (fd >= 0) {
+                details->set_nop(fd);
+                pids.insert(pid);
+                co_yield *details->get_orig_syscall();
+                co_return ExitStatus::SUCCESS;
             }
+            printf("[SecretFile] Unable to open/create placeholder file %s]", guest_placeholder);
+            rv = ExitStatus::SINGLE_FAILURE;
         } else {
             printf("[SecretFile] Guest %d is not allowed to open %s\n", pid, path);
         }
@@ -167,8 +183,8 @@ SyscallCoroutine start_coopter(SyscallCtx *details) {
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  map[SYS_openat] = start_coopter;
-  map[SYS_open] = start_coopter;
+  map[SYS_openat] = pre_open;
+  map[SYS_open] = pre_open;
   map[SYS_read] = pre_read;
   map[SYS_close] = pre_close;
 
