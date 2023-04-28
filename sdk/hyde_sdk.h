@@ -21,6 +21,10 @@
 #include "static_args.h" // For accumulate_stack_sizes template class magic
 
 
+// Instead of using a typedef we use modern c++
+using CoopterMap = std::unordered_map<int, create_coopter_t>;
+extern "C" bool init_plugin(CoopterMap map);
+
 /* There are a couple of syscalls where namespace conflicts make things
  * less clean than normal for users of yield_syscall:
  * stat, times, gettimeofday, settimeofday.
