@@ -26,10 +26,17 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
   for (int i=0; i < 255; i++) {
     uint64_t envp;
     char env_val[128];
-    // Read out the guest pointer to the next env var
+    // Read out the guest pointer to the next env var - If we actually can't read this, break
     if (yield_from(ga_memread, details, &envp, (uint64_t)&guest_envp[i], sizeof(envp)) == -1) {
-      printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
-      co_return ExitStatus::SINGLE_FAILURE;
+
+      if (i < 10) { 
+        // We failed really early - this probably indicates a bug
+        printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
+        co_return ExitStatus::SINGLE_FAILURE;
+      } else {
+        // We successfuly read some and then failed - we're probably past the end of the list
+        break;
+      }
     }
     if (envp == 0) break;
 
@@ -112,16 +119,13 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
   details->set_arg(2, guest_buf);
 
   // Inject the modified syscall, then be done
-  co_yield *(details->get_orig_syscall()); // noreturn, it's an execve
-  co_return ExitStatus::SUCCESS;
-
+  co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 
 cleanup_buf: // We have failed after allocating memory, clean it up
   //printf("[EnvMgr] Deallocate buffer at %llx for error\n", (__u64)injected_arg);
   yield_syscall(details, munmap, injected_arg, 1024);
 
-  co_yield *(details->get_orig_syscall()); // noreturn
-  co_return ExitStatus::SINGLE_FAILURE;
+  co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
