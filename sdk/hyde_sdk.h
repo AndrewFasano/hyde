@@ -15,6 +15,7 @@
 #include <utility>
 #include <coroutine>
 #include <sys/random.h>
+#include <sys/random.h>
 
 #include "hyde_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
@@ -66,11 +67,15 @@ inline int gettimeofday_(struct timeval *tv, struct timezone *tz) {
   })
 
 // Coroutine helpers - HyDE programs can yield_from these and the helpers can inject more syscalls if they'd like
-SyscCoroHelper ga_memcpy_one(SyscallCtx* r, void* out, uint64_t gva, size_t size);
+// {mem,str} + {cpy,read} or {put,write}
 SyscCoroHelper ga_memcpy(SyscallCtx* r, void* out, uint64_t gva, size_t size);
 SyscCoroHelper ga_memread(SyscallCtx* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_memput(SyscallCtx* r, uint64_t gva, void* in, size_t size);
 SyscCoroHelper ga_memwrite(SyscallCtx* r, uint64_t gva, void* in, size_t size);
-SyscCoroHelper ga_map(SyscallCtx* r, uint64_t gva, void** host, size_t min_size);
+SyscCoroHelper ga_strncpy(SyscallCtx* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_strnread(SyscallCtx* r, void* out, uint64_t gva, size_t size);
+SyscCoroHelper ga_strnput(SyscallCtx* r, uint64_t gva, void* in, size_t size);
+SyscCoroHelper ga_strnwrite(SyscallCtx* r, uint64_t gva, void* in, size_t size);
 
 template <long SyscallNumber, typename Function, typename... Args>
 hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Args... args) {
@@ -139,7 +144,7 @@ SyscCoroHelper map_args_to_guest_stack(SyscallCtx* details, uint64_t stack_addr,
   for (int i = 0; i < pending->nargs; i++) {
     if (pending->args[i].is_ptr) {
       //printf("Map arg %d: host %lx guest %lx\n", i, pending->args[i].value, pending->args[i].guest_ptr);
-      if (yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size) != 0) {
+      if (yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size) < 0) {
         printf("FATAL: failed to memwrite argument %d into guest stack\n", i);
         co_return -1;
       }
@@ -158,7 +163,10 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   for (int i = 0; i < sc->nargs; i++) {
     if (sc->args[i].is_ptr && sc->args[i].copy_out) {
       //printf("map guest %lx to host %lx, size %d\n", sc->args[i].guest_ptr, sc->args[i].value, sc->args[i].size);
-      yield_from(ga_memread, details, (void*)sc->args[i].value, sc->args[i].guest_ptr, sc->args[i].size); // XXX we want this, just need kvm
+      if (yield_from(ga_memread, details, (void*)sc->args[i].value, sc->args[i].guest_ptr, sc->args[i].size) < 0) {
+        printf("FATAL: failed to memread argument %d from guest stack\n", i);
+        co_return -1;
+      }
     }
   }
   co_return 0;
@@ -182,7 +190,7 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
     co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                             \
                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
     guest_stack = details->get_result(); /* Is this assert good enough error checking? */                   \
-    assert((int64_t)guest_stack > 0 || (int64_t)guest_stack < -500);                                        \
+    assert(((int64_t)guest_stack > 0 || (int64_t)guest_stack < -500) && "MMAP stack fails");                \
     co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, guest_stack, padded_total_size, 0);     \
   }                                                                                                         \
   hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                               \
