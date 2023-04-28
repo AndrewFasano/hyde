@@ -11,7 +11,7 @@
 SyscallCoroutine pre_exec(SyscallCtx* details) {
 
   // Environment to inject - hardcoded in here for now
-  std::string inject = "HyDE_var=HyDE_val";
+  std::string inject = "HyDE_var=HyDE_val_1234";
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
@@ -21,17 +21,17 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
 
 
   // Create guest and host envp references and use to read arguments out
-  uint64_t *guest_envp = (uint64_t*)details->get_arg(2);
+  uint64_t guest_envp = details->get_arg(2);
 
   for (int i=0; i < 255; i++) {
     uint64_t envp;
     char env_val[128];
     // Read out the guest pointer to the next env var - If we actually can't read this, break
-    if (yield_from(ga_memread, details, &envp, (uint64_t)&guest_envp[i], sizeof(envp)) == -1) {
+    if (yield_from(ga_memread, details, &envp, guest_envp + (i*8), 8) == -1) {
 
       if (i < 10) { 
         // We failed really early - this probably indicates a bug
-        printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, (uint64_t)&guest_envp[i]);
+        printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, guest_envp + (i*8));
         co_return ExitStatus::SINGLE_FAILURE;
       } else {
         // We successfuly read some and then failed - we're probably past the end of the list
@@ -41,7 +41,7 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
     if (envp == 0) break;
 
     // Read out the value of the env var
-    if (yield_from(ga_memread, details, &env_val, envp, sizeof(env_val)) == -1) {
+    if (yield_from(ga_strnread, details, &env_val, envp, sizeof(env_val)) < 0) {
       printf("[EnvMgr] Error reading envp[%d] at gva %lx, not checking for duplicate name\n", i, (uint64_t)envp);
       strcpy(env_val, "[MEM ERROR]");
       goto save_ptrs;
