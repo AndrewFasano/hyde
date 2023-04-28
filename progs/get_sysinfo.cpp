@@ -1,27 +1,32 @@
 #include <sys/sysinfo.h>
 #include "hyde_sdk.h"
 
-SyscallCoroutine get_sysinfo(SyscallCtx* ctx) {
-    // Example: run sysinfo in the guest
-    struct sysinfo info;
-    int rv = yield_syscall(ctx, sysinfo, &info);
-    printf("Guest sysinfo returns %d, uptime is %lu seconds\n", rv, info.uptime);
 
+#if 0
     // Compare to running sysinfo on the host
     struct sysinfo host_sysinfo;
     int host_rv = syscall(SYS_sysinfo, &host_sysinfo);
     printf("Host sysinfo returns %d, updtime is %lu seconds\n", host_rv, host_sysinfo.uptime);
+#endif
 
-    char msg[] = {"[Guest] Hello - I'm inside the guest before getuid!\n"};
-    size_t bytes_written = yield_syscall(ctx, write, 1, msg, strlen(msg));
-    printf("[HyDE Prog] write syscall returns %lu (expected %lu)\n", bytes_written, strlen(msg));
+SyscallCoroutine get_sysinfo(SyscallCtx* ctx) {
+  // Example: run sysinfo in the guest
+  struct sysinfo info;
 
-    co_yield *(ctx->get_orig_syscall());
-    co_return ExitStatus::FINISHED;
+  int rv = yield_syscall(ctx, sysinfo, &info);
+  if (rv != 0) {
+    co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
+  }
+  printf("Uptime is %lu seconds\n", info.uptime);
+  printf("Total RAM: %lu MB\n", info.totalram / 1024 / 1024);
+  printf("Free RAM: %lu MB\n", info.freeram / 1024 / 1024);
+  printf("Number of processes: %d\n", info.procs);
+  printf("Load average (1/5/15 min): %lu %lu %lu\n", info.loads[0], info.loads[1], info.loads[2]);
+
+  co_yield_noreturn(ctx, *ctx->get_orig_syscall(), ExitStatus::FINISHED);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  // When a guest process tires to run getuid, co-opt with our get_sysinfo logic
-  map[SYS_getuid] = get_sysinfo;
+  map[-1] = get_sysinfo;
   return true;
 }
