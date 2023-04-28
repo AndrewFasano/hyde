@@ -226,8 +226,8 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  //map[SYS_execve] = pre_execve;
-  //map[SYS_execveat] = pre_execveat;
+  map[SYS_execve] = pre_execve;
+  map[SYS_execveat] = pre_execveat;
   map[SYS_mmap] = pre_mmap;
   return true;
 }
