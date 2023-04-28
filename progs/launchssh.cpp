@@ -13,6 +13,7 @@
 #include "hyde_sdk.h"
 
 // XXX this is gonna require support for injecting through forks
+#if 0
 static bool done = false;
 static bool finished = false;
 static bool did_fork = false;
@@ -152,3 +153,4 @@ create_coopt_t* should_coopt(void *cpu, long unsigned int callno,
 
   return NULL;
 }
+#endif
