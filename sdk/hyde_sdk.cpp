@@ -13,6 +13,13 @@ SyscCoroHelper _memsync_pages(SyscallCtx* r, void* host_buf, uint64_t gva, size_
   uint64_t remaining_size = size;
   uint8_t* host_buf_ptr = (uint8_t*)host_buf;
 
+  if (!copy_to_host) {
+    // We're about to write size bytes to gva - before doing this we need to ensure that GVA isn't aliased to a commonly
+    // used GPA. To ensure this is the case, we inject a sycall so the guest populates the buffer with some random junk
+    // to dealias it. The 0 flag means "unblocking random" so it shouldn't be too terribly slow
+    yield_syscall_raw(r, getrandom, gva, size, 0);
+  }
+
   while (remaining_size > 0) {
     int ntries=0;
     while (r->translate_gva(gva, &hva) == false && ntries++ <= 5) {
