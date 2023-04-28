@@ -21,8 +21,6 @@
 static int open_count = 0;
 static bool created_placeholder = false;
 
-std::unordered_set<int> pids;
-
 // Hardcoded file that guest will see when it's allowed
 const char host_file[] = {"/etc/issue"};
 const char guest_file[] = {"/issue"};
@@ -35,12 +33,11 @@ bool is_allowed(int pid) {
 }
 
 SyscallCoroutine pre_close(SyscallCtx *details) {
-    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd> if we have any active pids
-
-    if (pids.size() == 0 || pids.count(yield_syscall(details, getpid)) == 0) {
+    if (open_count == 0) {
         co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
     }
 
+    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd> if we have any active pids
     char path[sizeof(guest_placeholder)];
     int rv = yield_from(fd_to_filename, details, (uint64_t)details->get_arg(0), path); // XXX why you fail
 
@@ -56,22 +53,19 @@ SyscallCoroutine pre_close(SyscallCtx *details) {
     }
 
     if (strncmp(path, guest_placeholder, strlen(path)) == 0) {
-        printf("DROP PID FROM PIDS: %d\n", yield_syscall(details, getpid));
-        pids.erase(yield_syscall(details, getpid));
-        printf("PIDS now has %ld elements\n", pids.size());
+        // Closing our file
+        open_count--;
     }
 
     co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
 }
 
 SyscallCoroutine pre_read(SyscallCtx *details) {
-    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
-
-    // Is pid in pids?
-    if (pids.size() == 0 || pids.count(yield_syscall(details, getpid)) == 0) {
+    if (open_count == 0) {
         co_yield_noreturn(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
     }
 
+    // Guest is about to read a FD - is out ours? Check with readlink /proc/self/fd/<fd>
     char path[128];
     int rv = yield_from(fd_to_filename, details, details->get_arg(0), path);
 
@@ -119,6 +113,9 @@ SyscallCoroutine pre_read(SyscallCtx *details) {
         pid_tid_pos[pid_tid] += count; // update position in file
 
         // Write data into guest memory at the requested output buffer, if there's any data
+        // XXX: We're directly writing to 0-initialized guest memory, we need the guest to intialize the buffer
+        // before we write to it (see discussion of /dev/zero clobbering elsewhere)
+        //yield_syscall(details, getrandom, outbuf, count, 0);
         if (count > 0 && yield_from(ga_memwrite, details, outbuf, (void*)scratch, count) == -1) {
             printf("Unable to write hostfile data into guestfile\n");
         }
@@ -148,7 +145,7 @@ SyscallCoroutine pre_open(SyscallCtx *details) {
         co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
     }
 
-    if (strncmp(path, guest_file, sizeof(guest_file)) == 0) {
+    if (strncmp(path, guest_file, strlen(guest_file)) == 0) {
         int pid = yield_syscall(details, getpid);
         // Trying to open our target file
         //printf("SecretFile: Guest is trying to open our file: %s\n", path);
@@ -168,7 +165,6 @@ SyscallCoroutine pre_open(SyscallCtx *details) {
 
             if (fd >= 0) {
                 details->set_nop(fd);
-                pids.insert(pid);
                 co_yield *details->get_orig_syscall();
                 co_return ExitStatus::SUCCESS;
             }
