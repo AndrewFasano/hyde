@@ -19,11 +19,12 @@
 #include "file_helpers.h"
 
 static int open_count = 0;
+static bool created_placeholder = false;
 
 // Hardcoded file that guest will see when it's allowed
 const char host_file[] = {"/etc/issue"};
 const char guest_file[] = {"/issue"};
-const char guest_placeholder[] = {"/tmp/.secretfile"};
+const char guest_placeholder[] = {"/tmp/.secretfile.txt"};
 
 std::map<std::pair<int, int>, int> pid_tid_pos; // (pid,tid) -> position in our file
 
@@ -84,8 +85,7 @@ SyscallCoroutine pre_read(SyscallCtx *details) {
         int host_fd = open(host_file, O_RDONLY);
         if (host_fd < 0) {
             printf("SecretFile: Unable to open host file %s: error %d\n", host_file, host_fd);
-            co_yield *(details->get_orig_syscall());
-            co_return ExitStatus::SINGLE_FAILURE;
+            co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
         }
 
         // Seek to guest_pos if non-zero
@@ -108,52 +108,54 @@ SyscallCoroutine pre_read(SyscallCtx *details) {
 
         // Orig syscall should return the number of bytes read
         details->set_nop(count);
-
         free(scratch);
+
+        // Can't run noreturn since we did set_nop
+        co_yield *details->get_orig_syscall();
+        co_return ExitStatus::SUCCESS;
     }
 
-    co_yield *(details->get_orig_syscall());
-    co_return ExitStatus::SUCCESS;
+    // Not ours - just run original syscall and don't track return
+    co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
-SyscallCoroutine start_coopter(SyscallCtx *details)
-{
+SyscallCoroutine start_coopter(SyscallCtx *details) {
     ExitStatus rv = ExitStatus::SUCCESS;
 
-    // Open: path pointer is first argument
-    int path_arg = 0;
-
-    if (details->get_orig_syscall()->callno == SYS_openat) {
-        // openat: path pointer is second argument
-        // TODO: do we care about resolving dirfd? Could use fcntls to get path
-        path_arg = 1;
-    }
-
+    int path_arg = (details->get_orig_syscall()->callno == SYS_open ? 0 : 1);
     uint64_t path_ptr = details->get_arg(path_arg);
 
     //printf("Read path at %lx aka %lx\n", (uint64_t)get_arg(regs, path_arg), (uint64_t)path_ptr);
     char path[128];
-    if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
+    if (yield_from(ga_strncpy, details, path, path_ptr, sizeof(path)) == -1) {
         printf("SecretFile: Unable to read path pointer %lx\n", path_ptr);
-        co_yield *(details->get_orig_syscall());
-        co_return ExitStatus::SINGLE_FAILURE;
+        co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
     }
 
     int pid = yield_syscall(details, getpid);
 
     if (strncmp(path, guest_file, sizeof(guest_file)) == 0) {
         // Trying to open our target file
-        //printf("SecretFile: Guest is trying to open %s\n", path);
+        //printf("SecretFile: Guest is trying to open our file: %s\n", path);
         if (is_allowed(pid)) {
             // Open and create the placeholder file
-            int fd = yield_syscall(details, open, guest_placeholder, O_CREAT);
+            int fd = yield_syscall(details, open, guest_placeholder, O_CREAT | O_RDWR, 0644);
             if (fd >= 0) {
                 open_count++;
                 // Modify orig_syscall object so when we yield it in a sec, the guest
                 // will end up with our FD instead of the one it wanted
                 details->set_nop(fd);
-            } else {
-                printf("[SecretFile] Unable to open placeholder file %s]", guest_placeholder);
+                created_placeholder = true;
+
+                co_yield *details->get_orig_syscall();
+                co_return ExitStatus::SUCCESS;
+
+            } else if (fd == -EEXIST && created_placeholder) {
+                fd = yield_syscall(details, open, guest_placeholder, O_RDONLY);
+            }
+
+            if (fd < 0) {
+                printf("[SecretFile] Unable to open/create placeholder file %s]", guest_placeholder);
                 rv = ExitStatus::SINGLE_FAILURE;
             }
         } else {
@@ -161,8 +163,7 @@ SyscallCoroutine start_coopter(SyscallCtx *details)
         }
     }
 
-    co_yield *(details->get_orig_syscall());
-    co_return rv;
+    co_yield_noreturn(details, *details->get_orig_syscall(), rv);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
