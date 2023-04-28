@@ -15,7 +15,7 @@
 #include <utility>
 #include <coroutine>
 #include <sys/random.h>
-#include <sys/random.h>
+#include <exception>
 
 #include "hyde_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
@@ -45,6 +45,14 @@ inline clock_t times_(struct tms *buf) {
 inline int gettimeofday_(struct timeval *tv, struct timezone *tz) {
     return ::gettimeofday(tv, tz);
 }
+
+/* Exception raised during a coroutine when we can't allocate guest memroy
+ * to use for our stack-based arguments */
+class NoStackExn : public std::exception {
+public:
+    NoStackExn();
+    virtual const char* what() const noexcept override { return "Unable to alloate stack in guest"; }
+};
 
 /* Yield_from runs a HydeCoro<hsyscall, uint>, yielding the syscalls it yields, then finally returns a value that's co_returned from there */
 #define yield_from(f, ...) \
@@ -82,7 +90,7 @@ hsyscall unchecked_build_syscall(Function syscall_func, uint64_t guest_stack, Ar
     //printf("Inject syscall %ld with %ld args\n", SyscallNumber, sizeof...(Args));
     // Now generate an hsyscall object with the syscall number, arguments, and number of args
     hsyscall s(SyscallNumber);
- 
+
     // Populate s->args with each of the elements in args and set s->nargs to the number of arguments.
     s.nargs = 0;
     auto set_args = [&s](auto &&arg) {
@@ -123,7 +131,7 @@ void map_one_arg(int idx, hsyscall *pending, uint64_t *stack_addr, auto args) {
     //printf("Allocation for arg %d: stack (GVA) %lx, size %u\n", idx, pending->args[idx].guest_ptr, pending->args[idx].size);
     *stack_addr += padded_size; // Shift stack address
   }
-} 
+}
 
 template <typename... Args>
 SyscCoroHelper map_args_to_guest_stack(SyscallCtx* details, uint64_t stack_addr, hsyscall *pending, std::tuple<Args...> tuple) {
@@ -172,6 +180,7 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   co_return 0;
 }
 
+SyscCoroHelper handle_stack_alloc(SyscallCtx *details, size_t total_size);
 
 /* Helper macro to be used by SyscCoro coroutines. Build an hsyscall using the given function name,
  * yield that hsyscall (which will cause the details object to update place a return in last_sc_ret),
@@ -183,47 +192,43 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   size_t total_size = accumulate_stack_sizes(arg_types_tup);                                                  \
   size_t padded_total_size = total_size + (1024 - (total_size % 1024));                                       \
   /*printf("Total stack size is %lu, padded to %lu\n", total_size, padded_total_size);*/                      \
-  uint64_t guest_stack = 0;                                                                                   \
-  if (total_size > 0)                                                                                         \
-  { /* We need some stack space for the arguments for this syscall. Allocate it! */                           \
-    co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, padded_total_size,                               \
-                                               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);   \
-    guest_stack = details->get_result(); /* Is this assert good enough error checking? */                     \
-    if (((int64_t)guest_stack < 0 && (int64_t)guest_stack > -500)) [[unlikely]]                               \
-    {                                                                                                         \
-      printf("FATAL: Failed to allocate %lx byte guest stack, got error %ld\n",                               \
-              padded_total_size, (int64_t)guest_stack);                                                       \
-      assert(0);                                                                                              \
-    }                                                                                                         \
-    /*printf("STACK: %ld bytes (from %ld) at %lx\n", padded_total_size, total_size, guest_stack);*/           \
-    co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, guest_stack, padded_total_size, 0);       \
-  }                                                                                                           \
-  hsyscall s = build_syscall<SYS_##func>(::func, guest_stack, ##__VA_ARGS__);                                 \
+  if (padded_total_size > 0) yield_from(handle_stack_alloc, details, padded_total_size);                      \
+  hsyscall s = build_syscall<SYS_##func>(::func, details->stack_, ##__VA_ARGS__);                             \
   if (total_size > 0)                                                                                         \
   {                                                                                                           \
     /* Now, we've built the syscall and have the scratch stack. Do the mapping!*/                             \
-    yield_from(map_args_to_guest_stack, details, guest_stack, &s, arg_types_tup);                             \
+    yield_from(map_args_to_guest_stack, details, details->stack_, &s, arg_types_tup);                         \
   }                                                                                                           \
   co_yield s;                                                                                                 \
   auto rv = details->get_result();                                                                            \
-  if (total_size > 0)                                                                                         \
-  { /* We previously allocated some stack space for this syscall, sync it back, then free it */               \
-    /*printf("FREE %ld bytes at %lx\n", padded_total_size, guest_stack);*/                                    \
-    yield_from(map_args_from_guest_stack, details, guest_stack, &s, arg_types_tup);                           \
-    co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, guest_stack, padded_total_size));              \
-  }                                                                                                           \
   rv;                                                                                                         \
   })
 
-#define co_yield_noreturn(details, syscall, retval) ({ \
-  details->set_noreturn(retval); co_yield syscall; \
-  co_return ExitStatus::FATAL; /* UNREACHABLE */ \
+#define free_stack(details) ({                                                                          \
+  if (details->stack_ != 0) {                                                                           \
+    co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, details->stack_, details->stack_size_)); \
+    details->stack_ = 0;                                                                                \
+    details->stack_size_ = 0;                                                                           \
+  }                                                                                                     \
 })
 
+#define finish(details, rv) ({ \
+  free_stack(details);         \
+  co_return rv;                \
+});
+
+#define yield_and_finish(details, syscall, retval)    \
+  free_stack(details);                                \
+  details->set_noreturn(retval);                      \
+  co_yield syscall;                                   \
+  co_return ExitStatus::FATAL; /* UNREACHABLE */      \
+
+#define co_yield_noreturn(details, syscall, retval) co_ret_noreturn(details, syscall, retval)
+
 /* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */
-#define yield_syscall_raw(details, func, ...) ({         \
+#define yield_syscall_raw(details, func, ...) ({                        \
   co_yield unchecked_build_syscall<SYS_##func>(::func, 0, __VA_ARGS__); \
-  details->get_result();                                    \
+  details->get_result();                                                \
 })
 
 #endif

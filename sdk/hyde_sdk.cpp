@@ -1,9 +1,11 @@
 #include <string.h>
 #include "hyde_sdk.h"
 
+NoStackExn::NoStackExn() {}
+
 #define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
 
-/* Internal funciton to synchronize guest->host or host-> guest memory. Supports strcpy-style early stop at null pointer 
+/* Internal funciton to synchronize guest->host or host-> guest memory. Supports strcpy-style early stop at null pointer
  * when going guest->host
 */
 
@@ -99,4 +101,40 @@ SyscCoroHelper ga_strnread(SyscallCtx* r, void* out, uint64_t gva, size_t size) 
 }
 SyscCoroHelper ga_strnwrite(SyscallCtx* r, uint64_t gva, void* in, size_t size) {
     co_return yield_from(ga_strnput, r, gva, in, size);
+}
+
+SyscCoroHelper handle_stack_alloc(SyscallCtx *details, size_t total_size) {
+  /* If we already have a stack that we'll fit into return it. Otherwise
+  deallocate the existing one if necessary and allocate a new one of sufficient size */
+
+  if (details->stack_ != 0 && details->stack_size_ <= total_size) [[likely]] {
+    co_return 0;
+  }
+
+  if (details->stack_ != 0) {
+    // Existing stack is too small, free it first
+    uint64_t old_stack = details->stack_;
+    size_t old_size = details->stack_size_;
+
+    details->stack_ = 0;
+    details->stack_size_ = 0;
+
+    co_yield unchecked_build_syscall<SYS_munmap>(::munmap, old_stack, old_size);
+  }
+
+  if (details->stack_ == 0) {
+    // We need to allocate a new stack
+    co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, total_size, \
+                                                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t guest_stack = details->get_result(); /* Is this assert good enough error checking? */
+    if (((int64_t)guest_stack < 0 && (int64_t)guest_stack > -500)) [[unlikely]] {
+      throw NoStackExn();
+      co_return -1;
+    }
+
+    // XXX: Be sure to always de-alias stack
+    co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, guest_stack, total_size, 0);
+    details->stack_ = guest_stack;
+  }
+  co_return 0;
 }
