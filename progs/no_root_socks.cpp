@@ -5,6 +5,7 @@
 #include "hyde_sdk.h"
 
 SyscallCoroutine block_sock(SyscallCtx* ctx) {
+  ExitStatus rv = ExitStatus::SUCCESS;
   int sockfd = ctx->get_arg(0);
   int euid = yield_syscall(ctx, geteuid);
 
@@ -14,20 +15,18 @@ SyscallCoroutine block_sock(SyscallCtx* ctx) {
 
     // get the local address associated with the socket
     if (yield_syscall(ctx, getsockname, sockfd, (struct sockaddr*)&addr, &len) < 0) {
-      std::cerr << "Error: getsockname failed" << std::endl;
-      co_yield *(ctx->get_orig_syscall());
-      co_return ExitStatus::SINGLE_FAILURE;
-    }
-
-    // check if the local address is a loopback address
-    if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
-      std::cerr << "Error: Remote listening socket detected at " << inet_ntoa(addr.sin_addr) << std::endl;
-      ctx->set_nop(-EADDRINUSE); // Instead of running syscall we'll just return this
+      std::cerr << "[NoRootSock] error: getsockname failed" << std::endl;
+      rv = ExitStatus::SINGLE_FAILURE;
+    } else {
+      // check if the local address is a loopback address
+      if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+        std::cerr << "[NoRootSock] BLOCK: Remote listening socket detected at " << inet_ntoa(addr.sin_addr) << std::endl;
+        ctx->set_nop(-EADDRINUSE); // Instead of running syscall we'll just return this
+      }
     }
   }
 
-  co_yield *(ctx->get_orig_syscall());
-  co_return ExitStatus::SUCCESS;
+  yield_and_finish(ctx, ctx->pending_sc(), rv);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
