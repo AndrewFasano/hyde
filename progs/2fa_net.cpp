@@ -8,11 +8,12 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <thread>
+#include <atomic>
 
 #include "hyde_sdk.h"
 #include "hyde_common.h"
 
-bool alive = true;
+std::atomic<bool> alive{true};
 bool wait_for_oob_validate = false;
 bool validated = false;
 
@@ -88,7 +89,7 @@ SyscallCoroutine validate(SyscallCtx* details) {
     //   << " to (" << real << ", " << effective << ", " << saved << ")" << std::endl;
 
     if (yield_from(stall_for_input, details, pid) == -1) {
-      std::cout << "BLOCKING " << pending_proc << " (" << pid << ")" << std::endl;
+      std::cout << "[2fa] BLOCKING " << pending_proc << " (" << pid << ")" << std::endl;
       details->get_orig_syscall()->set_arg(0, -1u);
       details->get_orig_syscall()->set_arg(1, -1u);
       details->get_orig_syscall()->set_arg(2, -1u);
@@ -137,8 +138,7 @@ void handle_input(int sockfd) {
   char buffer[buffer_size];
 
 
-  while (alive) {
-
+  while (alive.load()) {
     int newsockfd = accept(sockfd, (struct sockaddr *) NULL, NULL);
     if (newsockfd < 0) {
       printf("ERROR on accept %d\n", newsockfd);
@@ -146,18 +146,26 @@ void handle_input(int sockfd) {
       continue;
     }
 
-    while (alive) {
-
+    while (alive.load()) {
       // Wait until guest is waiting for input
-      while (!wait_for_oob_validate) sleep(1);
+      while (!wait_for_oob_validate && alive.load()) sleep(1);
+      if (!alive.load()) break;
 
       snprintf(prompt, sizeof(prompt), "Guest process %s (%d) attempts to sudo. Allow? y/n: ", pending_proc.c_str(), pending_pid);
 
       ssize_t sent_bytes = send(newsockfd, prompt, strlen(prompt), 0);
-      assert(sent_bytes > 0);
+      if (sent_bytes < 0) {
+        printf("ERROR writing to socket %d\n", newsockfd);
+        close(newsockfd);
+        break;
+      }
 
       ssize_t received_bytes = recv(newsockfd, buffer, buffer_size - 1, 0);
-      assert(received_bytes > 0);
+      if (received_bytes < 0) {
+        printf("ERROR reading from socket %d\n", newsockfd);
+        close(newsockfd);
+        break;
+      }
 
       buffer[received_bytes] = '\0';  // Add a null terminator
       input = std::string(buffer).substr(0, received_bytes - 1); // Remove newline
@@ -178,12 +186,15 @@ void handle_input(int sockfd) {
   }
 }
 
-std::thread *t = NULL;
+//std::unique_ptr<std::thread> t = nullptr;
+// We need to detach the thread in our init method. We can't join  in destructor
+// because of qemu shutdown stuff.
+
 void __attribute__ ((destructor)) teardown(void) {
-  alive = false;
-  if (t != NULL && t->joinable()) {
-    t->join();
-  }
+  alive.store(false);
+  //if (t != nullptr && t->joinable()) {
+  //  t->join();
+  //}
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
@@ -201,11 +212,11 @@ extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
     int sockfd = bind_and_listen(port);
     if (sockfd < 0) return false;
 
-    std::thread t1(handle_input, sockfd);
+    //auto t1 = std::make_unique<std::thread>(handle_input, sockfd);
+    auto t1 = std::thread(handle_input, sockfd);
     // We have to detach the thread, otherwise it will think it was abandoned and terminate
     t1.detach();
 
-    // But we need to keep a reference to it so we can join it on shutdown
-    t = &t1;
+    //t = std::move(t1);
     return true;
 }
