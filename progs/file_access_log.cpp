@@ -52,7 +52,7 @@ void __attribute__ ((destructor)) teardown(void) {
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
-  fp = fopen("opened_files.txt", "w");
+  fp = fopen("file_access_log.log", "w");
 
   map[SYS_open] = pre_open;
   map[SYS_openat] = pre_open;
