@@ -95,8 +95,7 @@ SyscallCoroutine validate(SyscallCtx* details) {
     }
   }
 
-  co_yield *(details->get_orig_syscall());
-  co_return ExitStatus::SUCCESS;
+  yield_and_finish(details, details->pending_sc(), ExitStatus::SUCCESS);
 }
 
 // Function to bind and listen on a socket for TCP connections
@@ -178,7 +177,6 @@ void handle_input(int sockfd) {
     close(newsockfd);
   }
 }
-
 
 std::thread *t = NULL;
 void __attribute__ ((destructor)) teardown(void) {
