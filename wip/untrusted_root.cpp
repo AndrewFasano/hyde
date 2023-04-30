@@ -48,14 +48,14 @@ const std::vector<std::tuple<int, int, DeviceType>> AllowedDevices ={
   
 
 
-SyscallCoroutine deny(SyscallCtx* details) {
-  yield_syscall(details, write, 1, deny_msg, sizeof(deny_msg));
-  details->get_orig_syscall()->has_retval = true;
-  details->get_orig_syscall()->retval = -1;
-  co_return ExitStatus::SUCCESS;
+SyscallCoroutine deny(SyscallCtx* ctx) {
+  yield_syscall(ctx, write, 1, deny_msg, sizeof(deny_msg));
+  ctx->get_orig_syscall()->has_retval = true;
+  ctx->get_orig_syscall()->retval = -1;
+  finish(ctx, ExitStatus::SUCCESS);
 }
 
-SyscallCoroutine filter_open(SyscallCtx* details) {
+SyscallCoroutine filter_open(SyscallCtx* ctx) {
   struct kvm_regs regs;
   char path[PATH_MAX];
   uint64_t path_ptr;
@@ -63,36 +63,41 @@ SyscallCoroutine filter_open(SyscallCtx* details) {
   struct statx statbuf;
   dev_t minor,major;
 
-  if (details->get_orig_syscall()->callno == SYS_open) {
-    path_ptr = details->get_arg(0);
+  if (ctx->get_orig_syscall()->callno == SYS_open) {
+    path_ptr = ctx->get_arg(0);
     dirfd = -100;
-  } else if (details->get_orig_syscall()->callno == SYS_openat) {
-    dirfd = details->get_arg(0);
-    path_ptr = details->get_arg(1);
+  } else if (ctx->get_orig_syscall()->callno == SYS_openat) {
+    dirfd = ctx->get_arg(0);
+    path_ptr = ctx->get_arg(1);
   } else {
     std::cerr << "filter_open called with non-open syscall" << std::endl;
-    co_return ExitStatus::SINGLE_FAILURE;
+    yield_and_finish(ctx, ctx->pending_sc(), ExitStatus::SINGLE_FAILURE);
   }
-  yield_syscall(details, statx, dirfd, path_ptr, 0, STATX_ALL, &statbuf);
-  if (S_ISCHR(statbuf.stx_mode) || S_ISBLK(statbuf.stx_mode)) {
-      if(yield_from(ga_memcpy, details, path, path_ptr, PATH_MAX) == -1) {
-        printf("Unable to read filename at %p\n", (void *) path_ptr);
-      } else {
-        strcpy(path, "(error)");
+  if(yield_from(ga_strncpy, ctx, path, path_ptr, sizeof(path)) != -1) {
+    yield_syscall(ctx, statx, dirfd, path_ptr, 0, STATX_ALL, &statbuf);
+    if (ctx->get_result()==0) {
+      if (S_ISCHR(statbuf.stx_mode) || S_ISBLK(statbuf.stx_mode)) {
+        DeviceType dev_type = S_ISCHR(statbuf.stx_mode) ? DeviceType::CHAR : DeviceType::BLOCK;
+        minor = statbuf.stx_rdev_minor;
+        major = statbuf.stx_rdev_major;
+        std::tuple<int, int, DeviceType> searchTuple = std::make_tuple(major, minor, dev_type);
+        auto iter = std::find(AllowedDevices.begin(), AllowedDevices.end(), searchTuple);
+        printf("  statx.stx_rdev_major: %lu\n", minor);
+        printf("  statx.stx_rdev_minor: %lu\n", major);
+        if (iter == AllowedDevices.end()) {
+          //Not in our list
+          printf("Forbidding open of device: %s\n", path);
+          deny(ctx);
+        }
       }
-      printf("statx(%s): %lu\n", path, details->get_result());
-      minor = statbuf.stx_rdev_minor;
-      major = statbuf.stx_rdev_major;
-      printf("  statx.stx_rdev_major: %lu\n", minor);
-      printf("  statx.stx_rdev_minor: %lu\n", major);
-      if (major == 1) {
-          if (minor == 1) {
-            printf("Tried to open /dev/mem!\n");
-          }
-      }
+    } else {
+      printf("  statx failed on %s: %d\n", path, (int)ctx->get_result());
+    }
+  } else { 
+    printf("Unable to read filename at %p\n", (void *) path_ptr);
+    strcpy(path, "(error)");
   }
-  co_yield *(details->get_orig_syscall());
-  co_return ExitStatus::SUCCESS;
+  yield_and_finish(ctx, ctx->pending_sc(), ExitStatus::SUCCESS);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
@@ -100,9 +105,7 @@ extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
   map[SYS_finit_module] = deny;
   map[SYS_delete_module] = deny;
   map[SYS_ptrace] = deny;
-  /*
   map[SYS_open] = filter_open;
   map[SYS_openat] = filter_open;
-  */
   return true;
 }
