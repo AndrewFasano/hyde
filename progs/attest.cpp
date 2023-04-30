@@ -13,6 +13,8 @@
 #include "hyde_sdk.h"
 #include "file_helpers.h"
 
+FILE *fp;
+
 // Store mapping of filenames to sha1sums
 const std::vector<const char*> known_files = {"/usr/bin/sha1sum", "/lib/x86_64-linux-gnu/libc-2.27.so"};
 const std::vector<const char*> known_hashes = {"e1468f91b7aaf27fab685abe9ae2fce5037a2f00", "18292bd12d37bfaf58e8dded9db7f1f5da1192cb"};
@@ -61,40 +63,45 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
   memcpy(path_buf, path, strlen(path)+1);
 
   // Open target binary for reading
-  guest_fd = yield_syscall(details, open, path_buf, O_RDONLY);
-  if (guest_fd < 0) {
-    co_return guest_fd; // Failed to open file - no need to cleanup, have negative value here
-  }
-
-  // Read file until we hit EOF, update sha1sum as we go
-  while (true) {
-    char host_data[BUF_SZ];
-    int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
-    if (bytes_read == 0) break;
-
-    if (!SHA1_Update(&context, host_data, bytes_read)) {
-      printf("[Attest] Unable to update sha context\n");
-      fail = true;
-      rv = INTERNAL_ERROR;
-      break;
+  try {
+    guest_fd = yield_syscall(details, open, path_buf, O_RDONLY);
+    if (guest_fd < 0) {
+      co_return guest_fd; // Failed to open file - no need to cleanup, have negative value here
     }
-  }
 
-  if (!fail) {
-    unsigned char hash[SHA_DIGEST_LENGTH];
-    if (!SHA1_Final(hash, &context)) {
-      printf("[Attest] Unable to finalize sha context\n");
-      rv = INTERNAL_ERROR; // Still need to close
-    } else {
-      // Turn our sha1sum into a digest string
-      int i = 0;
-      for (i=0; i < SHA_DIGEST_LENGTH; i++) {
-          sprintf((char*)&(outbuf[i*2]), "%02x", hash[i]);
+    // Read file until we hit EOF, update sha1sum as we go
+    while (true) {
+      char host_data[BUF_SZ];
+      int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
+      if (bytes_read == 0) break;
+
+      if (!SHA1_Update(&context, host_data, bytes_read)) {
+        printf("[Attest] Unable to update sha context\n");
+        fail = true;
+        rv = INTERNAL_ERROR;
+        break;
       }
     }
-  }
 
-  yield_syscall(details, close, guest_fd);
+    if (!fail) {
+      unsigned char hash[SHA_DIGEST_LENGTH];
+      if (!SHA1_Final(hash, &context)) {
+        printf("[Attest] Unable to finalize sha context\n");
+        rv = INTERNAL_ERROR; // Still need to close
+      } else {
+        // Turn our sha1sum into a digest string
+        int i = 0;
+        for (i=0; i < SHA_DIGEST_LENGTH; i++) {
+            sprintf((char*)&(outbuf[i*2]), "%02x", hash[i]);
+        }
+      }
+    }
+
+    yield_syscall(details, close, guest_fd);
+  } catch (const NoStackExn& e) {
+    printf("[Attest] Unable to open file %s\n", path);
+    rv = INTERNAL_ERROR;
+  }
   co_return rv;
 }
 
@@ -107,53 +114,65 @@ SyscallCoroutine pre_execveat(SyscallCtx* details) {
 
   ExitStatus rv = ExitStatus::SUCCESS;
 
-  // Read pathname from arg 1
   char path[256];
-  if (yield_from(ga_memread, details, path, details->get_arg(1), sizeof(path)) == -1) {
-      printf("[Attest] Unable to read filename\n");
-      rv = ExitStatus::SINGLE_FAILURE;
-      goto out;
+  if (details->get_arg(1) == 0) {
+    // NULL pathname - ignore
+    goto out;
   }
 
-  if (fd == AT_FDCWD) {
-    // Ignore dirfd when fd is AT_FDCWD
-    // Set full_path to just be pathname
-    snprintf(full_path, sizeof(full_path), "%s", path);
-
-  } else {
-    char dir_path[PATH_LENGTH];
-    int fd_status = yield_from(fd_to_filename, details, fd, dir_path);
-    if (fd_status < 0) {
-      printf("[Attest] Unable to get filename for fd %d\n", rv);
-      rv = ExitStatus::SINGLE_FAILURE;
-      goto out;
+  try {
+    // Read pathname from arg 1
+    if (yield_from(ga_strncpy, details, path, details->get_arg(1), sizeof(path)) == -1) {
+        printf("[Attest] Unable to read filename\n");
+        rv = ExitStatus::SINGLE_FAILURE;
+        goto out;
     }
-    // Set full_path to be dir_path / path
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, path);
-  }
 
-  unsigned char digest[SHA_DIGEST_LENGTH*2+1];
-  hash_result = yield_from(hash_file, details, full_path, digest);
+    if (fd == AT_FDCWD) {
+      // Ignore dirfd when fd is AT_FDCWD
+      // Set full_path to just be pathname
+      snprintf(full_path, sizeof(full_path), "%s", path);
 
-  if (hash_result == INTERNAL_ERROR) {
-    // We failed
-    printf("[Attest] Unable to hash file %s: %d\n", full_path, hash_result);
-    rv = ExitStatus::SINGLE_FAILURE; // Not our failure
-  } else if (hash_result < 0) {
-    // Not our failure, leave RV as success
-  } else {
-    // Actual success, we calculated the hash
-    if (!hash_match(full_path, (char*)digest)) {
-      printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", full_path, digest);
-
-      details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
-      rv = ExitStatus::SUCCESS; // Successfully blocked it
+    } else {
+      char dir_path[PATH_LENGTH];
+      int fd_status = yield_from(fd_to_filename, details, fd, dir_path);
+      if (fd_status < 0) {
+        printf("[Attest] Unable to get filename for fd %d\n", rv);
+        rv = ExitStatus::SINGLE_FAILURE;
+        goto out;
+      }
+      // Set full_path to be dir_path / path
+      snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, path);
     }
+
+    unsigned char digest[SHA_DIGEST_LENGTH*2+1];
+    hash_result = yield_from(hash_file, details, full_path, digest);
+
+    if (hash_result == INTERNAL_ERROR) {
+      // We failed
+      printf("[Attest] Unable to hash file %s: %d\n", full_path, hash_result);
+      rv = ExitStatus::SINGLE_FAILURE; // Not our failure
+    } else if (hash_result < 0) {
+      // Not our failure, leave RV as success
+    } else {
+      // Actual success, we calculated the hash
+      fprintf(fp, "executable file %s with hash %s\n", full_path, digest);
+      if (!hash_match(full_path, (char*)digest)) {
+        printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", full_path, digest);
+        fprintf(fp, "BLOCKED execution of file %s with hash %s\n", full_path, digest);
+
+        details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+        co_yield *details->get_orig_syscall(); // Yield the NOP we just set
+        finish(details, ExitStatus::SUCCESS); // Successfully blocked it
+      }
+    }
+  } catch (const NoStackExn& e) {
+    rv = ExitStatus::SINGLE_FAILURE;
   }
 
 out:
   // yield original syscall (execve_at)
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_execve(SyscallCtx* details) {
@@ -161,30 +180,43 @@ SyscallCoroutine pre_execve(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
   uint64_t path_ptr = details->get_arg(0);
 
-  if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
-      printf("[Attest] Unable to read filename at %lx\n", path_ptr);
-      rv = ExitStatus::SINGLE_FAILURE;
-  } else {
-    //printf("Exec filename; %s\n", path);
-    unsigned char digest[SHA_DIGEST_LENGTH*2+1] = {0};
-    int hash_result = yield_from(hash_file, details, path, digest);
-    if (hash_result == INTERNAL_ERROR) {
-      // We failed
-      printf("[Attest] Unable to hash file %s\n", path);
-      rv = ExitStatus::SINGLE_FAILURE;
-    } else if (hash_result < 0) {
-      // Not our failure, leave RV as success
+  try {
+    if (path_ptr == 0) {
+      // NULL pathname - ignore
+      goto out;
+    }
+
+    if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
+        printf("[Attest] Unable to read filename at %lx\n", path_ptr);
+        rv = ExitStatus::SINGLE_FAILURE;
     } else {
-      if (!hash_match(path, (char*)digest)) {
-        printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", path, digest);
-        details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
-        rv = ExitStatus::SUCCESS; // Successfully blocked it
+      //printf("Exec filename; %s\n", path);
+      unsigned char digest[SHA_DIGEST_LENGTH*2+1] = {0};
+      int hash_result = yield_from(hash_file, details, path, digest);
+      if (hash_result == INTERNAL_ERROR) {
+        // We failed
+        printf("[Attest] Unable to hash file %s\n", path);
+        rv = ExitStatus::SINGLE_FAILURE;
+      } else if (hash_result < 0) {
+        // Not our failure, leave RV as success
+      } else {
+        fprintf(fp, "executable file %s with hash %s\n", path, digest);
+        if (!hash_match(path, (char*)digest)) {
+          printf("[Attest] BLOCKING EXECUTION OF %s. Has sha1sum of %s which is not allowed\n", path, digest);
+          fprintf(fp, "BLOCKED execution of file %s with hash %s\n", path, digest);
+          details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+          co_yield *details->get_orig_syscall();
+          finish(details, ExitStatus::SUCCESS);
+        }
       }
     }
-  }
 
+  } catch (const NoStackExn& e) {
+    rv = ExitStatus::SINGLE_FAILURE;
+  }
+out:
   // yield original syscall
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_mmap(SyscallCtx* details) {
@@ -195,37 +227,48 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
   int flags  = details->get_arg(3);
   int fd = details->get_arg(4);
 
-  if (!(flags & MAP_ANONYMOUS)) {
-    if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
-      printf("[Attest] Unable to get filename for fd %d\n", fd);
-      rv = ExitStatus::SINGLE_FAILURE;
-    } else {
-      // Successfully got filename, let's use it!
-      unsigned char digest[SHA_DIGEST_LENGTH*2+1] = {0};
-
-      int hash_result = yield_from(hash_file, details, lib_path, digest);
-      if (hash_result == INTERNAL_ERROR) {
-        // We failed
-        printf("[Attest] Unable to hash mapped file %s\n", lib_path);
+  try {
+    if (!(flags & MAP_ANONYMOUS)) {
+      if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
+        printf("[Attest] Unable to get filename for fd %d\n", fd);
         rv = ExitStatus::SINGLE_FAILURE;
-      } else if (hash_result < 0) {
-        // Not our failure, leave RV as success
       } else {
-        printf("[Attest] Mapped file %s with hash %s\n", lib_path, digest);
-        if (!hash_match(lib_path, (char*)digest)) {
-          printf("[Attest] BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
-          details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
-          rv = ExitStatus::SUCCESS; // Successfully blocked it
+        // Successfully got filename, let's use it!
+        unsigned char digest[SHA_DIGEST_LENGTH*2+1] = {0};
+
+        int hash_result = yield_from(hash_file, details, lib_path, digest);
+        if (hash_result == INTERNAL_ERROR) {
+          // We failed
+          printf("[Attest] Unable to hash mapped file %s\n", lib_path);
+          rv = ExitStatus::SINGLE_FAILURE;
+        } else if (hash_result < 0) {
+          // Not our failure, leave RV as success
+        } else {
+          fprintf(fp, "mapped file %s with hash %s\n", lib_path, digest);
+          if (!hash_match(lib_path, (char*)digest)) {
+            printf("[Attest] BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
+            fprintf(fp, "BLOCKING MAP OF %s. Has sha1sum of %s which is not allowed\n", lib_path, digest);
+            details->set_nop(-ENOEXEC); // Replace orig syscall with noop that returns -ENOEXEC
+            co_yield *details->get_orig_syscall();
+            finish(details, ExitStatus::SUCCESS);
+          }
         }
       }
     }
-  }
 
+  } catch (const NoStackExn& e) {
+    rv = ExitStatus::SINGLE_FAILURE;
+  }
   // yield original syscall
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
-extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+void __attribute__ ((destructor)) teardown(void) {
+    fclose(fp);
+}
+
+bool init_plugin(CoopterMap map) {
+  fp = fopen("attest.log", "w");
   map[SYS_execve] = pre_execve;
   map[SYS_execveat] = pre_execveat;
   map[SYS_mmap] = pre_mmap;
