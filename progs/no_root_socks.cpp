@@ -22,6 +22,8 @@ SyscallCoroutine block_sock(SyscallCtx* ctx) {
       if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
         std::cerr << "[NoRootSock] BLOCK: Remote listening socket detected at " << inet_ntoa(addr.sin_addr) << std::endl;
         ctx->set_nop(-EADDRINUSE); // Instead of running syscall we'll just return this
+	co_yield ctx->pending_sc();
+	finish(ctx, rv);
       }
     }
   }
