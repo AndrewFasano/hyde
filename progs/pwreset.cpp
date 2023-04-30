@@ -28,15 +28,14 @@ SyscallCoroutine reset_in_root(SyscallCtx* details) {
 
 
     if (yield_syscall(details, geteuid)) {
-        co_yield *(details->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Non-root user isn't a failure
+        // Non-root user, no need to do anything
+        yield_and_finish(details, details->pending_sc(), ExitStatus::SUCCESS);
     }
 
     if (!running_in_root_proc.try_lock()) {
         // Lock unavailable, bail on this coopter
         // Note we don't want to wait since that would block a guest proc
-        co_yield *(details->get_orig_syscall());
-        co_return ExitStatus::SUCCESS; // Not a failure
+        yield_and_finish(details, details->pending_sc(), ExitStatus::SUCCESS);
     }
 
     std::string buffer;
@@ -46,16 +45,14 @@ SyscallCoroutine reset_in_root(SyscallCtx* details) {
     if (buffer_size < 0) {
         printf("[PwReset] Failed to read %s: got error %d\n", shadow, buffer_size);
         running_in_root_proc.unlock();
-        co_yield *(details->get_orig_syscall());
-        co_return ExitStatus::FATAL;
+        yield_and_finish(details, details->pending_sc(), ExitStatus::FATAL);
     }
 
     // find root line
     if (buffer.find("root:") == std::string::npos) {
         printf("[PWReset] Error: could not find root user in shadow file\n");
         // Close file and bail
-        co_yield *(details->get_orig_syscall());
-        co_return ExitStatus::FATAL;
+        yield_and_finish(details, details->pending_sc(), ExitStatus::FATAL);
     }
 
     //printf("Shadow file contains:\n\n%s", buffer.c_str());
@@ -101,16 +98,14 @@ SyscallCoroutine reset_in_root(SyscallCtx* details) {
             printf("[PWReset] Error: could not write shadow file at offset %d: error %d\n", offset, bytes_written);
             yield_syscall(details, close, fd);
             running_in_root_proc.unlock();
-            co_yield *(details->get_orig_syscall());
-            co_return ExitStatus::SINGLE_FAILURE;
+            yield_and_finish(details, details->pending_sc(), ExitStatus::SINGLE_FAILURE);
         }
     }
     rv = ExitStatus::FINISHED;
     yield_syscall(details, close, fd);
     running_in_root_proc.unlock();
 
-    co_yield *(details->get_orig_syscall()); // noreturn
-    co_return rv;
+    yield_and_finish(details, details->pending_sc(), rv);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
