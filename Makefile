@@ -11,7 +11,7 @@ PROGS = $(patsubst %.cpp,%.so,$(SRCS))
 
 HYDE = $(wildcard sdk/*.cpp)
 HYDE_O = $(patsubst %.cpp,%.o,$(HYDE))
-HYDE_H = $(wildcard sdk/*.h)
+HYDE_H = $(wildcard sdk/*.h) $(wildcard sdk/*.tpp)
 
 all: $(PROGS)
 
