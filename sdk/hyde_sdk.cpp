@@ -3,8 +3,6 @@
 
 NoStackExn::NoStackExn() {}
 
-#define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
-
 /* Internal funciton to synchronize guest->host or host-> guest memory. Supports strcpy-style early stop at null pointer
  * when going guest->host
 */

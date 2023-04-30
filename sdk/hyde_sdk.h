@@ -20,6 +20,8 @@
 #include "hyde_common.h"
 #include "static_args.h" // For accumulate_stack_sizes template class magic
 
+#define PAGE_SIZE 1024 // Setting for alignment of guest pages to host pages
+
 
 // Instead of using a typedef we use modern c++
 using CoopterMap = std::unordered_map<int, create_coopter_t>;
@@ -155,6 +157,7 @@ SyscCoroHelper map_args_to_guest_stack(SyscallCtx* details, uint64_t stack_addr,
   // Now look through pending->args and actually do the memory mappings
   for (int i = 0; i < pending->nargs; i++) {
     if (pending->args[i].is_ptr) {
+      assert(pending->args[i].guest_ptr != 0); /* No nullptrs! */
       //printf("Map arg %d: host %lx guest %lx\n", i, pending->args[i].value, pending->args[i].guest_ptr);
       if (yield_from(ga_memwrite, details, pending->args[i].guest_ptr, (void*)pending->args[i].value, pending->args[i].size) < 0) {
         printf("FATAL: failed to memwrite argument %d into guest stack\n", i);
@@ -184,65 +187,61 @@ SyscCoroHelper map_args_from_guest_stack(SyscallCtx* details, uint64_t stack_add
   co_return 0;
 }
 
-// We can't have this as an independent coroutine because we want callers of yield_syscall to be able
-// to catch NoStackExns - if it was it's own SyscCoroHelper the exception wouldn't be able to bubble up
-#define CHECK_STACK(details, total_size) ({                                                                   \
-  if (details->stack_ == 0 || details->stack_size_ <= total_size)                                             \
-  {                                                                                                           \
-    if (details->stack_ != 0)                                                                                 \
-    {                                                                                                         \
-      uint64_t old_stack = details->stack_;                                                                   \
-      size_t old_size = details->stack_size_;                                                                 \
-      details->stack_ = 0;                                                                                    \
-      details->stack_size_ = 0;                                                                               \
-      co_yield unchecked_build_syscall<SYS_munmap>(::munmap, old_stack, old_size);                            \
-    }                                                                                                         \
-    if (details->stack_ == 0)                                                                                 \
-    {                                                                                                         \
-      co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, total_size,                                    \
-                                                 PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
-      uint64_t guest_stack = details->get_result();                                                           \
-      if (((int64_t)guest_stack < 0 && (int64_t)guest_stack > -500)) [[unlikely]]                             \
-      {                                                                                                       \
-         printf("DANGER: mmap failed with %ld\n", (int64_t)guest_stack);                                      \
-        throw NoStackExn();                                                                                   \
-      }                                                                                                       \
-      /* XXX: De-alias guest memory so it's safe to write to! */                                              \
-      co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, guest_stack, total_size, 0);            \
-      details->stack_ = guest_stack;                                                                          \
-    }                                                                                                         \
-  }                                                                                                           \
-})
+static int active_allocs = 0;
 
 /* Helper macro to be used by SyscCoro coroutines. Build an hsyscall using the given function name,
  * yield that hsyscall (which will cause the details object to update place a return in last_sc_ret),
  * free the heap-allocated hsyscall, and finally provide the caller with the result of the simulated
  * syscall which was set in details->last_sc_ret.
  */
-#define yield_syscall(details, func, ...) ({                                             \
-  auto arg_types_tup = deduce_types_and_sizes(__VA_ARGS__);                              \
-  size_t total_size = accumulate_stack_sizes(arg_types_tup);                             \
-  size_t padded_total_size = total_size + (1024 - (total_size % 1024));                  \
-  /*printf("Total stack size is %lu, padded to %lu\n", total_size, padded_total_size);*/ \
-  if (padded_total_size > 0)                                                             \
-    CHECK_STACK(details, padded_total_size);                                             \
-  hsyscall s = build_syscall<SYS_##func>(::func, details->stack_, ##__VA_ARGS__);        \
-  if (total_size > 0)                                                                    \
-  {                                                                                      \
-    /* Now, we've built the syscall and have the scratch stack. Do the mapping!*/        \
-    yield_from(map_args_to_guest_stack, details, details->stack_, &s, arg_types_tup);    \
-  }                                                                                      \
-  co_yield s;                                                                            \
-  auto rv = details->get_result();                                                       \
-  rv;                                                                                    \
+#define yield_syscall(details, func, ...) ({                                                                \
+  auto arg_types_tup = deduce_types_and_sizes(__VA_ARGS__);                                                 \
+  size_t _total_size = accumulate_stack_sizes(arg_types_tup);                                               \
+  size_t total_size = _total_size > 0 ? (_total_size + (PAGE_SIZE - (_total_size % PAGE_SIZE))) : 0;        \
+  uint64_t stack = 0;                                                                                       \
+  if (total_size > 0 && !details->stack_can_fit(total_size))                                               \
+  {                                                                                                         \
+    if (details->has_stack())                                                                               \
+    { /* We have a stack, but it's too small */                                                             \
+      std::pair<uint64_t, size_t> cur_stack = details->get_stack();                                         \
+      details->clear_stack();                                                                               \
+      co_yield unchecked_build_syscall<SYS_munmap>(::munmap, 0, cur_stack.first, cur_stack.second);         \
+    }                                                                                                       \
+    /* Allocate a new stack of the padded size*/                                                            \
+    co_yield unchecked_build_syscall<SYS_mmap>(::mmap, 0, 0, total_size,                                    \
+                                               PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
+    stack = details->get_result();                                                                          \
+    if (((int64_t)stack < 0 && (int64_t)stack > -500)) [[unlikely]]                                         \
+    {                                                                                                       \
+      printf("EXN IN STACK ALLOC\n");                                                                       \
+      throw NoStackExn();                                                                                   \
+    }                                                                                                       \
+    /* XXX: De-alias guest memory so it's safe to write to! */                                              \
+    /*co_yield unchecked_build_syscall<SYS_getrandom>(::getrandom, 0, stack, total_size, 0);*/              \
+    /* We do this on arg_mapping in ga_memwrite instead of here XXX might be wrong?*/                       \
+    details->set_stack(stack, total_size);                                                                  \
+  } else if (details->has_stack()) {                                                                        \
+    stack = details->get_stack().first;                                                                     \
+  }                                                                                                         \
+  hsyscall s = build_syscall<SYS_##func>(::func, stack, ##__VA_ARGS__);                                     \
+  if (total_size > 0)                                                                                       \
+  { /* We have input args on our stack - copy them in */                                                    \
+    yield_from(map_args_to_guest_stack, details, stack, &s, arg_types_tup);                                 \
+  }                                                                                                         \
+  co_yield s;                                                                                               \
+  if (total_size > 0)                                                                                       \
+  { /* We have arguments on the stack - copy them out */                                                    \
+    yield_from(map_args_from_guest_stack, details, stack, &s, arg_types_tup);                               \
+  }                                                                                                         \
+  details->get_result();                                                                                    \
 })
 
-#define free_stack(details) ({                                                                          \
-  if (details->stack_ != 0) {                                                                           \
-    co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, details->stack_, details->stack_size_)); \
-    details->stack_ = 0;                                                                                \
-    details->stack_size_ = 0;                                                                           \
-  }                                                                                                     \
+#define free_stack(details) ({                                                                      \
+  if (details->has_stack()) {                                                                       \
+    std::pair<uint64_t, size_t> cur_stack = details->get_stack();                                   \
+    co_yield (unchecked_build_syscall<SYS_munmap>(::munmap, 0, cur_stack.first, cur_stack.second)); \
+    details->clear_stack();                                                                         \
+  }                                                                                                 \
 })
 
 #define finish(details, rv) ({ \
