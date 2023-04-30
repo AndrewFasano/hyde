@@ -64,6 +64,14 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
   int g_stdin = yield_syscall(details, open, "/dev/stdin", O_RDONLY);
   int g_stdout = yield_syscall(details, open, "/dev/stdout", O_WRONLY);
 
+  if (g_stdin < 0 || g_stdout < 0) {
+    std::cout << "[2FA VMM] Failed to open stdin/stdout for " << pending_proc << ": ( " << g_stdin << ", " << g_stdout << "). NOT FILTERING" << std::endl;
+    if (g_stdin >= 0) yield_syscall(details, close, g_stdin);
+    if (g_stdout >= 0) yield_syscall(details, close, g_stdout);
+    mtx.unlock();
+    co_return 0;
+  }
+
 
   while (1) {
     // generate a 6 digit random value - print on VMM
@@ -87,22 +95,24 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
 
     int resp_code = atoi(response);
 
-    if (resp_code == -1) {
-      // No integer (e.g., empty) - bail
-      std::cout << "[2FA VMM] - non-integer response, blocking process" << std::endl;
+    if (resp_code == 0) {
+      // No integer (e.g., empty) - bail. For now fail open since we'll sometimes
+      // not be able to get stdin hooked up with key system processes
+      std::cout << "[2FA VMM] - non-integer response allowing process" << std::endl;
+      validated = true;
       break;
     }
 
     pending_pid = pid;
     last_resp_time = time(NULL);
     validated = (resp_code == code);
-    bool cancel = (bytes_read == 0);
+    bool cancel = strncmp(response, "\n", 1) == 0;
 
     if (validated) {
       std::cout << "[2FA VMM] Code accepted" << std::endl;
       break;
     } else if (cancel) {
-      std::cout << "[2FA VMM] Canceling" << std::endl;
+      std::cout << "[2FA VMM] Canceling." << std::endl;
       validated = false;
       break;
     } else {
