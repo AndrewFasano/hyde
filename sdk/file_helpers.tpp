@@ -1,3 +1,6 @@
+#ifndef FILE_HELPERS_TPP_IMPL
+#define FILE_HELPERS_TPP_IMPL
+
 #include "file_helpers.h"
 // .tpp file to keep implementation out of header,
 // but to indicate that this is a template file, built as
@@ -37,8 +40,9 @@ SyscCoroHelper read_file(SyscallCtx* details, const char (&fname)[N], std::strin
     int bytes_read;
     do {
         bytes_read = yield_syscall(details, read, fd, &buffer, sizeof(buffer));
+        if (bytes_read <= 0) break;
         total_bytes_read += bytes_read;
-        outbuf->append(buffer, bytes_read); // Is this okay with a read of 0 bytes?jI
+        outbuf->append(std::string(buffer, bytes_read)); // Is this okay with a read of 0 bytes?
     } while (bytes_read > 0);
     co_return total_bytes_read;
 }
@@ -56,3 +60,4 @@ SyscCoroHelper fd_to_contents(SyscallCtx* details, int fd, std::string &outbuf) 
 
   co_return yield_from(read_file, details, filename, outbuf);
 }
+#endif
