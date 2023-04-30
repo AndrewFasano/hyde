@@ -32,7 +32,7 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
       if (i < 10) { 
         // We failed really early - this probably indicates a bug
         printf("[EnvMgr] Error reading &envp[%d] at gva %lx\n", i, guest_envp + (i*8));
-        co_return ExitStatus::SINGLE_FAILURE;
+        yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
       } else {
         // We successfuly read some and then failed - we're probably past the end of the list
         break;
@@ -73,7 +73,7 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
 
   if ((int64_t)guest_buf <= 0 && (int64_t)guest_buf > -0x1000) {
     printf("[EnvMgr] ERROR allocating scratch buffer got: %lu\n", (int64_t) guest_buf);
-    co_return ExitStatus::SINGLE_FAILURE;
+    yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
   }
 
   // Save start of guest buffer
@@ -119,13 +119,13 @@ SyscallCoroutine pre_exec(SyscallCtx* details) {
   details->set_arg(2, guest_buf);
 
   // Inject the modified syscall, then be done
-  co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
+  yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 
 cleanup_buf: // We have failed after allocating memory, clean it up
   //printf("[EnvMgr] Deallocate buffer at %llx for error\n", (__u64)injected_arg);
   yield_syscall(details, munmap, injected_arg, 1024);
 
-  co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
+  yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SINGLE_FAILURE);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
