@@ -39,11 +39,11 @@ SyscallCoroutine pre_open(SyscallCtx *details) {
         // This should never happen - increment our counter, but also raise a fatal error
         printf("ERROR: HyDE failed to read path pointer %lx\n", path_ptr);
         hyde_failures++;
-        co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::FATAL);
+        yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::FATAL);
     }
 
     fprintf(fp, "File access: %s, flags %lx, mode: %lx\n", path, details->get_arg(path_arg+1), details->get_arg(path_arg+2));
-    co_yield_noreturn(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
+    yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
 void __attribute__ ((destructor)) teardown(void) {
