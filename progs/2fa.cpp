@@ -66,33 +66,24 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
 
 
   while (1) {
-    // Generate a 6 digit random value - print on VMM
+    // generate a 6 digit random value - print on VMM
     int code = rand() % 1000000;
     std::cout << "[2FA VMM] Process " << pending_proc << "(" << pid << ") tries to switch to root. Code: " << code << std::endl;
 
     const char prompt[] = "2FA: Enter code to allow process to run as root (or press enter to cancel): ";
-    char response[100];
+    char response[100] = {0};
     // Print the prompt in the guest with yield_syscall, then get a response
     // from the user with yield_from. This is a bit hacky, but it works.
     int bytes_written = yield_syscall(details, write, g_stdout, prompt, sizeof(prompt));
-    int bytes_read = yield_syscall(details, read, g_stdin, response, sizeof(response));
-    // Can we make this read timeout?
+    int bytes_read = yield_syscall(details, read, g_stdin, response, sizeof(response)); // Can we make this read timeout?
+    if (bytes_read > 0 && bytes_read < sizeof(response)) {
+      response[bytes_read] = '\0';
+    }
 
     char outbuf[100] = {0};
     char inbuf[100] = {0};
 
-  #if 0
-    snprintf(inbuf, 100, "/proc/self/fds/%d", 0);
-    int rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
-    printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
-
-    snprintf(inbuf, 100, "/proc/self/fds/%d", g_stdin);
-    rv = yield_syscall(details, readlink, inbuf, outbuf, sizeof(outbuf));
-    printf("Readlink %d: %s=>%s\n", rv, inbuf, outbuf);
-    printf("Wrote %d, read %d\n", bytes_written, bytes_read);
-  #endif
-
-    assert(bytes_read != sizeof(response)); // XXX Testing - this is probalby a bug?
+    assert(bytes_read != sizeof(response)); // XXX Testing - this is probably a bug?
 
     int resp_code = atoi(response);
 
@@ -105,12 +96,17 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
     pending_pid = pid;
     last_resp_time = time(NULL);
     validated = (resp_code == code);
+    bool cancel = (bytes_read == 0);
 
     if (validated) {
       std::cout << "[2FA VMM] Code accepted" << std::endl;
       break;
-    }else {
-      std::cout << "[2FA VMM] Invalid code - reprompting" << std::endl;
+    } else if (cancel) {
+      std::cout << "[2FA VMM] Canceling" << std::endl;
+      validated = false;
+      break;
+    } else {
+      std::cout << "[2FA VMM] Invalid code. Got: " << response << " =>" << resp_code << " expected; " << code << ". reprompting" << std::endl;
     }
   }
 
@@ -154,8 +150,7 @@ SyscallCoroutine validate(SyscallCtx* details) {
     }
   }
 
-  co_yield *(details->get_orig_syscall());
-  co_return ExitStatus::SUCCESS;
+  yield_and_finish(details, *(details->get_orig_syscall()), ExitStatus::SUCCESS);
 }
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
