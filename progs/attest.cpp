@@ -49,8 +49,6 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
-  unsigned hash[5] = {0};
-  char buf[41] = {0};
   SHA_CTX context;
   bool fail = false;
 
@@ -74,16 +72,22 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
       char host_data[BUF_SZ];
       int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
       if (bytes_read == 0) break;
+      if (bytes_read < 0) {
+        printf("[Attest] Unable to read file %s: %d\n", path_buf, bytes_read);
+        fail = true;
+        break;
+      }
 
       if (!SHA1_Update(&context, host_data, bytes_read)) {
         printf("[Attest] Unable to update sha context\n");
         fail = true;
-        rv = INTERNAL_ERROR;
         break;
       }
     }
 
-    if (!fail) {
+    if (fail) {
+      rv = INTERNAL_ERROR;
+    } else {
       unsigned char hash[SHA_DIGEST_LENGTH];
       if (!SHA1_Final(hash, &context)) {
         printf("[Attest] Unable to finalize sha context\n");
