@@ -1,4 +1,3 @@
-#include <asm/unistd.h> // Syscall numbers
 #include <cstring>
 #include <stdio.h>
 #include <string>
@@ -16,6 +15,7 @@
 
 #define BUF_SZ 1024 // Size to use for read chunks
 #define INTERNAL_ERROR -99999
+FILE *fp;
 
 std::unordered_set<std::string> read_files;
 
@@ -29,7 +29,6 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
 
   std::vector<__u64> guest_arg_ptrs;
   std::vector<std::string> arg_list;
-  unsigned hash[5] = {0};
   char buf[41] = {0};
   SHA_CTX context;
   bool fail = false;
@@ -48,24 +47,37 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
     co_return guest_fd; // Failed to open file - no need to cleanup, have negative value here
   }
 
-  // Read file until we hit EOF, update sha1sum as we go
-  while (true) {
+  // Read file until we hit EOF, or 1024*1000 bytes update sha1sum as we go
+  int loop_count = 0;
+  while (loop_count++ < 1000000) {
+    if (loop_count == 999999) [[unlikely]] {
+      printf("Bailing early on %s - inifnite loop?\n", path_buf); // Unlikely
+      fail = true;
+      break;
+    }
+
     char host_data[BUF_SZ];
     int bytes_read = yield_syscall(details, read, guest_fd, host_data, BUF_SZ);
     if (bytes_read == 0) break;
+    if (bytes_read < 0) {
+      printf("[SBOM] Unable to read file %s: %d\n", path_buf, bytes_read);
+      fail = true;
+      break;
+    }
 
     if (!SHA1_Update(&context, host_data, bytes_read)) {
       printf("[SBOM] Unable to update sha context\n");
       fail = true;
-      rv = INTERNAL_ERROR;
       break;
     }
   }
 
-  if (!fail) {
+  if (fail) {
+    rv = INTERNAL_ERROR;
+  } else {
     unsigned char hash[SHA_DIGEST_LENGTH];
     if (!SHA1_Final(hash, &context)) {
-      printf("[Attest] Unable to finalize sha context\n");
+      printf("[SBOM] Unable to finalize sha context\n");
       rv = INTERNAL_ERROR; // Still need to close
     } else {
       // Turn our sha1sum into a digest string
@@ -82,9 +94,7 @@ SyscCoroHelper hash_file(SyscallCtx *details, char(&path)[N], unsigned char (&ou
 
 template <std::size_t N>
 SyscCoroHelper hash_if_new(SyscallCtx* details, char (&lib_path)[N]) {
-  if (!read_files.count(std::string(lib_path))) {
-    std::string filebuf;
-    int read_sz = yield_from(read_file, details, lib_path, &filebuf);
+  if (read_files.count(std::string(lib_path)) == 0) {
     read_files.insert(std::string(lib_path));
 
     unsigned char hashbuf[SHA_DIGEST_LENGTH*2+1] = {0};
@@ -96,7 +106,7 @@ SyscCoroHelper hash_if_new(SyscallCtx* details, char (&lib_path)[N]) {
     } else if (hash_result < 0) {
       // Not our failure, leave RV as success
     } else {
-      printf("[SBOM] Mapped file %s with hash %s\n", lib_path, hashbuf);
+      fprintf(fp, "%s, %s\n", lib_path, hashbuf);
     }
   }
   co_return 0;
@@ -104,7 +114,7 @@ SyscCoroHelper hash_if_new(SyscallCtx* details, char (&lib_path)[N]) {
 
 
 SyscallCoroutine pre_execveat(SyscallCtx* details) {
-  char full_path[256];
+  char full_path[PATH_LENGTH];
   int readlink_rv;
   int fd = details->get_arg(0);
   int hash_result;
@@ -112,7 +122,7 @@ SyscallCoroutine pre_execveat(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
 
   // Read pathname from arg 1
-  char path[256];
+  char path[PATH_LENGTH];
   if (yield_from(ga_memread, details, path, details->get_arg(1), sizeof(path)) == -1) {
       printf("[SBOM] Unable to read filename\n");
       rv = ExitStatus::SINGLE_FAILURE;
@@ -136,13 +146,15 @@ SyscallCoroutine pre_execveat(SyscallCtx* details) {
     snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, path);
   }
 
+  if (strlen(full_path) > 0) {
     if (yield_from(hash_if_new, details, full_path) == -1) {
       rv = ExitStatus::SINGLE_FAILURE;
     }
+  }
 
 out:
   // yield original syscall
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_execve(SyscallCtx* details) {
@@ -150,22 +162,22 @@ SyscallCoroutine pre_execve(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
   uint64_t path_ptr = details->get_arg(0);
 
-  if (yield_from(ga_memcpy, details, path, path_ptr, sizeof(path)) == -1) {
+  if (yield_from(ga_strncpy, details, path, path_ptr, sizeof(path)) < 0) {
       printf("[SBOM] Unable to read filename at %lx\n", path_ptr);
       rv = ExitStatus::SINGLE_FAILURE;
-  } else {
+  } else if (strlen(path)) {
       if (yield_from(hash_if_new, details, path) == -1) {
         rv = ExitStatus::SINGLE_FAILURE;
       }
   }
 
   // yield original syscall
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
 SyscallCoroutine pre_mmap(SyscallCtx* details) {
   ExitStatus rv = ExitStatus::SUCCESS;
-  char lib_path[128];
+  char lib_path[PATH_LENGTH];
 
   // fifth arg may be an FD, but it's ignored if the fourth arg is MAP_ANONYMOUS (note get_arg 0-indexes)
   int flags  = details->get_arg(3);
@@ -175,7 +187,7 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
     if (yield_from(fd_to_filename, details, fd, lib_path) == -1) {
       printf("[SBOM] Unable to get filename for fd %d\n", fd);
       rv = ExitStatus::SINGLE_FAILURE;
-    } else {
+    } else if (strlen(lib_path)) {
       // Successfully got filename, let's use it!
       if (yield_from(hash_if_new, details, lib_path) == -1) {
         rv = ExitStatus::SINGLE_FAILURE;
@@ -184,10 +196,16 @@ SyscallCoroutine pre_mmap(SyscallCtx* details) {
   }
 
   // yield original syscall
-  co_yield_noreturn(details, *(details->get_orig_syscall()), rv);
+  yield_and_finish(details, *(details->get_orig_syscall()), rv);
 }
 
-extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+
+void __attribute__ ((destructor)) teardown(void) {
+    fclose(fp);
+}
+
+bool init_plugin(CoopterMap map) {
+  fp = fopen("sbom.log", "w");
   map[SYS_execve] = pre_execve;
   map[SYS_execveat] = pre_execveat;
   map[SYS_mmap] = pre_mmap;
