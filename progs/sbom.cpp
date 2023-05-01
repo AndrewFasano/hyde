@@ -107,6 +107,11 @@ SyscCoroHelper hash_if_new(SyscallCtx* details, char (&lib_path)[N]) {
       // Not our failure, leave RV as success
     } else {
       fprintf(fp, "%s, %s\n", lib_path, hashbuf);
+
+      // Just to get automated testing to work:
+      if (strncmp(lib_path, "date", N) != 0) [[unlikely]] {
+          fflush(fp);
+      }
     }
   }
   co_return 0;

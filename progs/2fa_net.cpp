@@ -46,7 +46,7 @@ SyscCoroHelper stall_for_input(SyscallCtx* details, int pid) {
   while (wait_for_oob_validate) {
 
     if (stall_count++ > (10 * 1e9 / WAIT_NSEC)) { // Calculate the number of iterations for 10 seconds
-      std::cout << "No user input for " << pending_proc << " (" << pending_pid << ") after 10s, blocking..." << std::endl;
+      std::cout << "[2fa] No user input for " << pending_proc << " (" << pending_pid << ") after 10s, blocking..." << std::endl;
       wait_for_oob_validate = false;
       last_resp_time = time(NULL);
       co_return -1;
@@ -117,7 +117,8 @@ int bind_and_listen(int port) {
   serv_addr.sin_port = htons(port);
 
   // Next, we bind the socket to the address and port number
-  if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+  int bind_rv = bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr))
+  if (bind_rv < 0) {
     printf("ERROR on binding %d\n", sockfd);
     return -1;
   }

@@ -20,6 +20,7 @@
 
 static std::mutex running_in_root_proc;
 
+FILE* fp;
 
 SyscCoroHelper print_procinfo(SyscallCtx *ctx, std::vector<int> *pids) {
     for (int pid : *pids) {
@@ -47,7 +48,7 @@ SyscCoroHelper print_procinfo(SyscallCtx *ctx, std::vector<int> *pids) {
             if (comm[i] == '\n') comm[i] = ' ';
         }
 
-        printf("%03d: %-50s  %-20s\n", pid, cmdline.c_str(), comm.c_str());
+        fprintf(fp, "%03d: %-50s  %-20s\n", pid, cmdline.c_str(), comm.c_str());
     }
 
     co_return 0;
@@ -130,8 +131,12 @@ SyscallCoroutine ps_in_root(SyscallCtx *ctx) {
     //running_in_root_proc.unlock(); // Maybe never unlock?
     yield_and_finish(ctx, *ctx->get_orig_syscall(), ExitStatus::FINISHED);
 }
+void __attribute__ ((destructor)) teardown(void) {
+  fclose(fp);
+}
 
 extern "C" bool init_plugin(std::unordered_map<int, create_coopter_t> map) {
+  fp = fopen("ps.log", "w");
   map[-1] = ps_in_root;
   return true;
 }
