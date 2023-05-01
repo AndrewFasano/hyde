@@ -117,7 +117,7 @@ int bind_and_listen(int port) {
   serv_addr.sin_port = htons(port);
 
   // Next, we bind the socket to the address and port number
-  int bind_rv = bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr))
+  int bind_rv = bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr));
   if (bind_rv < 0) {
     printf("ERROR on binding %d\n", sockfd);
     return -1;
