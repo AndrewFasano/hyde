@@ -47,15 +47,15 @@ const std::vector<std::tuple<int, int, DeviceType>> AllowedDevices ={
   ...
   */
 
-#define skip_and_finish() \
-  ctx->set_nop(-1); \
+#define skip_and_finish(rv) \
+  ctx->set_nop(rv); \
   co_yield ctx->pending_sc(); \
   finish(ctx, ExitStatus::SUCCESS)
 
     
 SyscallCoroutine deny(SyscallCtx* ctx) {
-  printf("Denying syscall %lu\n", ctx->get_orig_syscall()->callno);
-  skip_and_finish();
+  printf("[UntrustedRoot] Denying syscall %lu\n", ctx->get_orig_syscall()->callno);
+  skip_and_finish(-EPERM);
 }
 
 SyscallCoroutine filter_open(SyscallCtx* ctx) {
@@ -76,48 +76,53 @@ SyscallCoroutine filter_open(SyscallCtx* ctx) {
     std::cerr << "filter_open called with non-open syscall" << std::endl;
     yield_and_finish(ctx, ctx->pending_sc(), ExitStatus::SINGLE_FAILURE);
   }
-  if(yield_from(ga_strncpy, ctx, path, path_ptr, sizeof(path)) != -1) {
-    //Block /proc/kcore - only file that's a device that we can't stat
-    if(strcmp(path, "/proc/kcore") == 0) {
-      skip_and_finish();
-    }
-    yield_syscall(ctx, statx, dirfd, path_ptr, 0, STATX_ALL, &statbuf);
-    if (ctx->get_result()==0) {
-      if (S_ISCHR(statbuf.stx_mode) || S_ISBLK(statbuf.stx_mode)) {
-        DeviceType dev_type = S_ISCHR(statbuf.stx_mode) ? DeviceType::CHAR : DeviceType::BLOCK;
-        minor = statbuf.stx_rdev_minor;
-        major = statbuf.stx_rdev_major;
-        std::tuple<int, int, DeviceType> searchTuple = std::make_tuple(major, minor, dev_type);
-        bool allowed = false;
-        //Bad manual search to support wildcard
-        for (auto & element : AllowedDevices) {
-          if (std::get<0>(element) == major) {
-            if (std::get<1>(element) == minor || std::get<1>(element) == -1) {
-              if (std::get<2>(element) == dev_type) {
-                //Found it
-                allowed = true;
-                break;
+
+  try {
+      if (yield_from(ga_strncpy, ctx, path, path_ptr, sizeof(path)) != -1) {
+        //Block /proc/kcore - only file that's a device that we can't stat
+        if(strcmp(path, "/proc/kcore") == 0) {
+          skip_and_finish(-ENOENT);
+        }
+        yield_syscall(ctx, statx, dirfd, path_ptr, 0, STATX_ALL, &statbuf);
+        if (ctx->get_result()==0) {
+          if (S_ISCHR(statbuf.stx_mode) || S_ISBLK(statbuf.stx_mode)) {
+            DeviceType dev_type = S_ISCHR(statbuf.stx_mode) ? DeviceType::CHAR : DeviceType::BLOCK;
+            minor = statbuf.stx_rdev_minor;
+            major = statbuf.stx_rdev_major;
+            std::tuple<int, int, DeviceType> searchTuple = std::make_tuple(major, minor, dev_type);
+            bool allowed = false;
+            //Bad manual search to support wildcard
+            for (auto & element : AllowedDevices) {
+              if (std::get<0>(element) == major) {
+                if (std::get<1>(element) == minor || std::get<1>(element) == -1) {
+                  if (std::get<2>(element) == dev_type) {
+                    //Found it
+                    allowed = true;
+                    break;
+                  }
+                }
               }
+            }
+            //printf("  statx.stx_rdev_major: %lu\n", minor);
+            //printf("  statx.stx_rdev_minor: %lu\n", major);
+            if (!allowed) {
+              //Not in our list
+              printf("Forbidding open of device: %s\n", path);
+              skip_and_finish(-ENOENT);
             }
           }
         }
-        //printf("  statx.stx_rdev_major: %lu\n", minor);
-        //printf("  statx.stx_rdev_minor: %lu\n", major);
-        if (!allowed) {
-          //Not in our list
-          printf("Forbidding open of device: %s\n", path);
-          skip_and_finish();
+        /*
+        else {
+          printf("  statx failed on %s: %d\n", path, (int)ctx->get_result());
         }
+        */
+      } else { 
+        printf("Unable to read filename at %p\n", (void *) path_ptr);
+        strcpy(path, "(error)");
       }
-    }
-    /*
-    else {
-      printf("  statx failed on %s: %d\n", path, (int)ctx->get_result());
-    }
-    */
-  } else { 
-    printf("Unable to read filename at %p\n", (void *) path_ptr);
-    strcpy(path, "(error)");
+  } catch (const NoStackExn& e) {
+    printf("[UntrustedRoot] Unable to allocate guest stack for analysis of opens\n");
   }
   yield_and_finish(ctx, ctx->pending_sc(), ExitStatus::SUCCESS);
 }
