@@ -255,7 +255,7 @@ static int active_allocs = 0;
   co_yield syscall;                                   \
   co_return ExitStatus::FATAL; /* UNREACHABLE */      \
 
-#define co_yield_noreturn(details, syscall, retval) co_ret_noreturn(details, syscall, retval)
+//#define co_yield_noreturn(details, syscall, retval) co_ret_noreturn(details, syscall, retval)
 
 /* Build and yield a syscall, return it's result. Do *not* auto allocate and map arguments. */
 #define yield_syscall_raw(details, func, ...) ({                        \
