@@ -3,6 +3,7 @@
 #include <set>
 #include "file_helpers.h" // read_file
 
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -90,9 +91,12 @@ SyscallCoroutine validate(SyscallCtx* details) {
 
     if (yield_from(stall_for_input, details, pid) == -1) {
       std::cout << "[2fa] BLOCKING " << pending_proc << " (" << pid << ")" << std::endl;
-      details->get_orig_syscall()->set_arg(0, -1u);
-      details->get_orig_syscall()->set_arg(1, -1u);
-      details->get_orig_syscall()->set_arg(2, -1u);
+      details->set_nop(-EPERM);
+      //details->get_orig_syscall()->set_arg(0, -1u);
+      //details->get_orig_syscall()->set_arg(1, -1u);
+      //details->get_orig_syscall()->set_arg(2, -1u);
+      co_yield details->pending_sc();
+      finish(details, ExitStatus::SUCCESS);
     }
   }
 
