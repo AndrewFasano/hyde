@@ -80,7 +80,8 @@ SyscallCoroutine filter_open(SyscallCtx* ctx) {
   try {
       if (yield_from(ga_strncpy, ctx, path, path_ptr, sizeof(path)) != -1) {
         //Block /proc/kcore - only file that's a device that we can't stat
-        if(strcmp(path, "/proc/kcore") == 0) {
+        if(strcmp(path, "/proc/kcore") == 0 || \
+           strcmp(path, "/etc/ld.so.preload") == 0) {
           skip_and_finish(-ENOENT);
         }
         yield_syscall(ctx, statx, dirfd, path_ptr, 0, STATX_ALL, &statbuf);
