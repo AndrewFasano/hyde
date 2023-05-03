@@ -43,6 +43,10 @@ SyscallCoroutine pre_open(SyscallCtx *details) {
     }
 
     fprintf(fp, "File access: %s, flags %lx, mode: %lx\n", path, details->get_arg(path_arg+1), details->get_arg(path_arg+2));
+    if (strstr(path, ".nocache") != NULL) [[unlikely]] { // Just to enable automated testing
+        fflush(fp);
+        fflush(NULL);
+    }
     yield_and_finish(details, *details->get_orig_syscall(), ExitStatus::SUCCESS);
 }
 
