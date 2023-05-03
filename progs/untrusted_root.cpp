@@ -30,8 +30,10 @@ const std::vector<std::tuple<int, int, DeviceType>> AllowedDevices ={
   {1, 10, DeviceType::CHAR}, // /dev/aio
   {1, 11, DeviceType::CHAR}, // /dev/kmsg
   {1, -1, DeviceType::BLOCK}, // /dev/ramX
+  {4, 64, DeviceType::CHAR}, // ttyS0 for centos
   {5, -1, DeviceType::CHAR}, // tty,console
   {10, -1, DeviceType::CHAR}, // catch-all for lots of features, could get more specific if we wanted to block some
+  {251, 0, DeviceType::CHAR}, // /dev/rtc - important for hwclock -s which we use in testing
 };
 
 //Used to Deny, but the list got long:
