@@ -47,6 +47,36 @@ SyscCoroHelper read_file(SyscallCtx* details, const char (&fname)[N], std::strin
     co_return total_bytes_read;
 }
 
+SyscCoroHelper fd_to_pos(SyscallCtx* details, int fd, ssize_t &pos) {
+  char fd_path[128]; // FD can't be that big
+  snprintf(fd_path, sizeof(fd_path), "/proc/self/fdinfo/%d", fd);
+
+  // Make a string as our outbuf arg
+  std::string outbuf;
+  int read_rv = yield_from(read_file, details, fd_path, &outbuf);
+
+  if (read_rv < 0) {
+    co_return read_rv;
+  }
+
+  // Now read the buffer. It should start with pos: <pos>. We want to extract pos.
+  std::istringstream iss(outbuf);
+  std::string line;
+  // Loop through lines looking for pos
+  while (std::getline(iss, line)) {
+    if (line.find("pos:") == 0) {
+      // Found pos line
+      std::istringstream pos_iss(line);
+      std::string pos_str;
+      pos_iss >> pos_str >> pos;
+      co_return 0;
+    }
+  }
+
+  co_return -1;
+}
+
+
 template <std::size_t N>
 SyscCoroHelper fd_to_contents(SyscallCtx* details, int fd, std::string &outbuf) {
 

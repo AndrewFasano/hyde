@@ -2,6 +2,8 @@
 #define FILE_HELPERS_H
 // for O_RDONLY
 #include <fcntl.h>
+#include <string> // for std::string
+#include <sstream>
 
 #include "hyde_sdk.h"
 #define PATH_LENGTH 256
@@ -15,6 +17,8 @@ SyscCoroHelper read_symlink(SyscallCtx* details, char(&inbuf)[N], char (&outbuf)
 
 template <std::size_t N>
 SyscCoroHelper read_file(SyscallCtx* details, char (&fname)[N], std::string &outbuf);
+
+SyscCoroHelper fd_to_pos(SyscallCtx* details, int fd, ssize_t &pos);
 
 // Now include the implementation - note .tpp file, see description in that file.
 #include "file_helpers.tpp"
