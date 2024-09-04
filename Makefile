@@ -1,12 +1,10 @@
-# CFLAGS needs -fcoroutines if building with gcc. But the internet claims
-# gcc is terrible with coroutines. Not sure if I believe that, but
-# I'm getting internal compiler errors now so let's give clang a shot!
+# CFLAGS needs -fcoroutines if building with gcc, but we encountered internal compiler errors with GCC coroutines so we use clang instead
 CXX=clang++-15
-CFLAGS=-g -I../qemu/hyde/include/ -I./sdk/ -std=c++20 -Wno-deprecated-declarations -fPIC
+CFLAGS=-g -I../hyde-qemu/hyde/include/ -I./sdk/ -std=c++20 -Wno-deprecated-declarations -fPIC
 SO_CFLAGS=-fPIC -shared $(CFLAGS)
 LDFLAGS=-fuse-ld=lld
 
-SRCS = $(wildcard progs/*.cpp)
+SRCS = $(wildcard hyde_programs/*.cpp)
 PROGS = $(patsubst %.cpp,%.so,$(SRCS))
 
 HYDE = $(wildcard sdk/*.cpp)
@@ -15,31 +13,18 @@ HYDE_H = $(wildcard sdk/*.h) $(wildcard sdk/*.tpp)
 
 all: $(PROGS)
 
-progs/gdbserver.o: progs/gdbserver.cpp
+hyde_programs/gdbserver.o: hyde_programs/gdbserver.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@
-
-progs/gptgdbserver: progs/gptgdbserver.cpp progs/gdbserver.o progs/gdbserver.h
-	$(CXX) $(CFLAGS) $< progs/gdbserver.o -o $@
-
-test: test.cpp
-	$(CXX) $(CFLAGS) $< -o $@
-
-templtest: templtest.cpp
-	$(CXX) $(CFLAGS) $< -o $@
 
 sdk/%.o: sdk/%.cpp $(HYDE_H)
 	$(CXX) $(CFLAGS) -c $< -o $@
 
 # Pwreset needs link with crypt
-progs/pwreset.so: progs/pwreset.cpp $(HYDE_O) $(HYDE_H)
+hyde_programs/pwreset.so: hyde_programs/pwreset.cpp $(HYDE_O) $(HYDE_H)
 	$(CXX) $(SO_CFLAGS) $< $(LDFLAGS) $(HYDE_O) -lcrypt -o $@
 
-# Hyperptrace needs link with pthread
-progs/hyperptrace.so: progs/hyperptrace.cpp $(HYDE_O) $(HYDE_H)
-	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -lpthread -o $@
-
 # Normal programs just link against hyde
-progs/%.so : progs/%.cpp $(HYDE_O) $(HYDE_H)
+hyde_programs/%.so : hyde_programs/%.cpp $(HYDE_O) $(HYDE_H)
 	$(CXX) $(SO_CFLAGS) $< $(HYDE_O) $(LDFLAGS) -o $@
 
 clean:
